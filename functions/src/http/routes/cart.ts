@@ -15,8 +15,8 @@
 
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
-import { catalogServices } from '@glamornate/data-catalog';
-import { okResponse, errResponse } from '@glamornate/contracts';
+import { catalogServices } from '../../lib/data-catalog';
+import { okResponse, errResponse } from '../../lib/contracts';
 import { validate, getValidated } from '../middleware/validate';
 
 export const cartRouter = Router();

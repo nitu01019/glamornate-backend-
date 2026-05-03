@@ -9,4 +9,4 @@ export type {
   HomeService,
   DiscountType,
   Promotion,
-} from '@glamornate/data-catalog';
+} from '../lib/data-catalog';

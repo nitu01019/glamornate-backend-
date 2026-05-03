@@ -4,7 +4,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import { catalogServices, getServiceById } from '../../data/glamornate-catalog';
-import { okResponse, errResponse } from '@glamornate/contracts';
+import { okResponse, errResponse } from '../../lib/contracts';
 
 export const serviceDetailRouter = Router();
 

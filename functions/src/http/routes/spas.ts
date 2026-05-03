@@ -12,7 +12,7 @@ import {
   type SpasListQuery,
   okResponse,
   errResponse,
-} from '@glamornate/contracts';
+} from '../../lib/contracts';
 import { validate, getValidated } from '../middleware/validate';
 
 export const spasRouter = Router();

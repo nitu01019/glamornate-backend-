@@ -5,7 +5,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import type { ZodSchema } from 'zod';
-import { errResponse } from '@glamornate/contracts';
+import { errResponse } from '../../lib/contracts';
 
 export type ValidatedTarget = 'query' | 'body' | 'params';
 

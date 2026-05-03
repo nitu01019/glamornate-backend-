@@ -18,7 +18,7 @@ import {
   type BookingRequest,
   okResponse,
   errResponse,
-} from '@glamornate/contracts';
+} from '../../lib/contracts';
 import { z } from 'zod';
 import { verifyAuth } from '../middleware/auth';
 import { validate, getValidated } from '../middleware/validate';

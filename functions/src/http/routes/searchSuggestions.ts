@@ -5,7 +5,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import { catalogServices } from '../../data/glamornate-catalog';
-import { SuggestionQuerySchema, okResponse, type SuggestionQuery } from '@glamornate/contracts';
+import { SuggestionQuerySchema, okResponse, type SuggestionQuery } from '../../lib/contracts';
 import { validate, getValidated } from '../middleware/validate';
 
 export const searchSuggestionsRouter = Router();

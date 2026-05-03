@@ -10,7 +10,7 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
-import { errResponse } from '@glamornate/contracts';
+import { errResponse } from '../../lib/contracts';
 
 export interface RateLimitOptions {
   windowMs: number;

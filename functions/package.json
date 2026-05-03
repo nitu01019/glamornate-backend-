@@ -26,8 +26,6 @@
     "node": "20"
   },
   "dependencies": {
-    "@glamornate/contracts": "file:../../packages/contracts",
-    "@glamornate/data-catalog": "file:../../packages/data-catalog",
     "@sendgrid/mail": "^8.1.3",
     "algoliasearch": "^4.20.0",
     "cors": "^2.8.5",

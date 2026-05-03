@@ -9,7 +9,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import * as admin from 'firebase-admin';
-import { errResponse } from '@glamornate/contracts';
+import { errResponse } from '../../lib/contracts';
 
 export interface AppCheckOptions {
   /**

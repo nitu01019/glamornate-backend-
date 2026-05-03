@@ -37,7 +37,7 @@ jobs:
 
       - name: Install function deps
         working-directory: functions
-        run: npm ci
+        run: npm install
 
       - name: Run rules tests via emulator
         run: |

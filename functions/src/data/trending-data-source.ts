@@ -4,7 +4,7 @@
  * from the in-memory catalog. The public response strips `bookingCount`.
  */
 
-import type { SpaCategory } from '@glamornate/contracts';
+import type { SpaCategory } from '../lib/contracts';
 import { catalogData, catalogServices } from './glamornate-catalog';
 
 export interface TrendingSearchInternal {

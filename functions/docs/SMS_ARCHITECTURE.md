@@ -1,3 +1,6 @@
+> **Public mirror disclaimer:** This document describes the architectural decision-making behind the Glamornate SMS integration. The production deployment uses MSG91 via the Firebase Extensions Marketplace. Specific MSG91 credentials, API keys, and live config are NOT in this repository — they live in the private deployment environment. This file is published for code review and reference.
+>
+
 # SMS Architecture — Glamornate Backend
 
 > Written: 2026-04-27  

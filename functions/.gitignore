@@ -1,0 +1,13 @@
+# Compiled TypeScript output — regenerated on every `npm run build`.
+# Root .gitignore already covers this path; this local copy is defense-in-depth
+# so the rule survives any future workspace restructuring.
+lib/
+
+# Deploy staging dir (created by scripts/deploy-functions.sh).
+.deploy-staging/
+
+# Local environment & logs
+.env*.local
+firestore-debug.log
+firebase-debug.log
+*.log

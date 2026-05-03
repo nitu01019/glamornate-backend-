@@ -270,7 +270,7 @@ async function seedSpasWithServices(): Promise<void> {
         amenities: ['parking', 'ac', 'wifi'],
         images: ['/images/spas/placeholder.webp'],
         location: { city: 'pune', state: 'Maharashtra', timezone: 'Asia/Kolkata' },
-        contact: { phone: '+91 9000000000', email: 'hello@glamornate.com' },
+        contact: { phone: '+91 9000000000', email: 'hello@glamornate.test' },
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       },

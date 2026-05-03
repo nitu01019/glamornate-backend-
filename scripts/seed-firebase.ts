@@ -81,6 +81,10 @@ const auth = getAuth(app);
 // ============================================================================
 // SEED DATA
 // ============================================================================
+// All values below are SYNTHETIC TEST FIXTURES — bank account numbers,
+// IFSC codes, addresses, and personal details are NOT real. Used for
+// dev/emulator seeding only.
+// ============================================================================
 
 const SPAS = [
   {
@@ -105,7 +109,7 @@ const SPAS = [
       timezone: 'Asia/Kolkata',
     },
     contact: {
-      phone: '+91 9876543210',
+      phone: '+91 9000000000',
       email: 'contact@serenityspa.com',
       website: 'https://serenityspa.com',
     },
@@ -120,8 +124,8 @@ const SPAS = [
     commission: { platformPercentage: 15, fixedFee: 50 },
     payout: {
       bankAccount: {
-        accountNumber: 'XXXX1234',
-        ifsc: 'SBIN0001234',
+        accountNumber: 'TEST-XXXX1234',
+        ifsc: 'TEST-SBIN0001234',
         accountName: 'Serenity Spa Pvt Ltd',
       },
       payoutFrequency: 'weekly',
@@ -172,7 +176,7 @@ const SPAS = [
       timezone: 'Asia/Kolkata',
     },
     contact: {
-      phone: '+91 9876543211',
+      phone: '+91 9000000001',
       email: 'hello@zenwellness.com',
     },
     categories: ['massage', 'wellness', 'body'],
@@ -577,7 +581,7 @@ async function createTestUsers() {
       profile: {
         displayName: 'Test Customer',
         email: 'customer@test.com',
-        phone: '+91 9999999999',
+        phone: '+91 9000000002',
       },
       emailVerified: true,
       phoneVerified: false,

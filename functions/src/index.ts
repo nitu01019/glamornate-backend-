@@ -79,6 +79,14 @@ export { reverseGeocode } from './callable/reverseGeocode';
 // ========== Phase 4 / 4C — Notifications Broadcast Callables ==========
 export { dispatchBroadcast } from './callable/dispatchBroadcast';
 
+// ========== Admin Tooling ==========
+// Admin-only callable that idempotently mirrors the Firestore
+// `users/{uid}.role === 'admin'` state into a Firebase Auth custom claim
+// (`{ admin: true }`). Groundwork for migrating storage.rules /
+// firestore.rules from Firestore-doc role lookups to verified custom
+// claims (defense-in-depth). See `docs/runbooks/admin-claims-migration.md`.
+export { setAdminClaim } from './callable/setAdminClaim';
+
 // ========== Event-Triggered Functions ==========
 export { onBookingCreated } from './events/onBookingCreated';
 // onBookingConfirmed removed: all confirmed-status logic is now handled by

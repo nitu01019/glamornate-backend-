@@ -20,7 +20,7 @@ import {
   SearchResponseSchema,
   TrendingResponseSchema,
   SuggestionResponseSchema,
-} from '@glamornate/contracts';
+} from '../../lib/contracts';
 import { buildApp } from '../../http/app';
 import { resetRateLimitBuckets } from '../../http/middleware/rateLimit';
 

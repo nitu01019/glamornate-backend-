@@ -5,7 +5,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import { catalogCategories, catalogData } from '../../data/glamornate-catalog';
-import { okResponse, errResponse, type Category } from '@glamornate/contracts';
+import { okResponse, errResponse, type Category } from '../../lib/contracts';
 
 export const categoriesRouter = Router();
 

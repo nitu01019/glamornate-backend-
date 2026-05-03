@@ -13,7 +13,7 @@ import express, { type Express, type Request, type Response } from 'express';
 import { corsMiddleware } from './middleware/cors';
 import { verifyAppCheck } from './middleware/appCheck';
 import { publicRateLimit, authedRateLimit } from './middleware/rateLimit';
-import { errResponse, okResponse } from '@glamornate/contracts';
+import { errResponse, okResponse } from '../lib/contracts';
 
 import { categoriesRouter } from './routes/services.categories';
 import { mostBookedRouter } from './routes/services.mostBooked';

@@ -4,7 +4,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import { promotions } from '../../data/promotions';
-import { okResponse, errResponse } from '@glamornate/contracts';
+import { okResponse, errResponse } from '../../lib/contracts';
 
 export const promotionsRouter = Router();
 

@@ -11,7 +11,7 @@ import {
   type ServicesListQuery,
   okResponse,
   errResponse,
-} from '@glamornate/contracts';
+} from '../../lib/contracts';
 import { validate, getValidated } from '../middleware/validate';
 
 export const servicesListRouter = Router();

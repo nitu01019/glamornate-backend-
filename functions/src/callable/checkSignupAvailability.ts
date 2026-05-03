@@ -5,7 +5,7 @@ import {
   CheckSignupAvailabilityRequestSchema,
   CheckSignupAvailabilityResponseSchema,
   type CheckSignupAvailabilityResponse,
-} from '@glamornate/contracts';
+} from '../lib/contracts';
 import { withRateLimit } from '../utils/withRateLimit';
 import { handleError } from '../utils/error-handler';
 import { createLogger } from '../utils/logger';

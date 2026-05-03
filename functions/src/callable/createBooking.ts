@@ -3,7 +3,7 @@ import * as admin from 'firebase-admin';
 import {
   CreateBookingDraftInputSchema,
   type CreateBookingDraftInput,
-} from '@glamornate/contracts';
+} from '../lib/contracts';
 import { callableOpts } from '../utils/callable-opts';
 import { withRateLimit } from '../utils/withRateLimit';
 import { handleError } from '../utils/error-handler';

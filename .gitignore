@@ -5,7 +5,7 @@ node_modules/
 
 # typescript build output
 functions/lib/
-lib/
+/functions/lib/
 *.tsbuildinfo
 
 # deploy staging artifacts (created by scripts/deploy-functions.sh)

@@ -1,0 +1,22 @@
+{
+  "lifecycle": {
+    "rule": [
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "matchesPrefix": ["temp/"],
+          "age": 1
+        }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "matchesPrefix": ["users/"],
+          "matchesSuffix": [".jpg", ".jpeg", ".png", ".webp"],
+          "age": 365,
+          "numNewerVersions": 3
+        }
+      }
+    ]
+  }
+}

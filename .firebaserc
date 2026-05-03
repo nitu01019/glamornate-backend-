@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "default": "glamornate-758c6"
+  },
+  "targets": {
+    "glamornate-758c6": {
+      "hosting": {
+        "app": ["glamornate-758c6"]
+      }
+    }
+  }
+}

@@ -1,0 +1,293 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ============================================================
+    // Helper Functions
+    // ============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // SECURITY: role is fetched from the requestor's Firestore user doc.
+    // Role assignment is performed exclusively via the Admin SDK
+    // (Cloud Functions). The Firestore `users/update` rule blocks
+    // clients from modifying their own role, so this lookup is safe.
+    function hasRole(role) {
+      return isAuthenticated()
+        && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == role;
+    }
+
+    // ---- Spa-scoping helpers (Phase 8) ----
+    //
+    // The H1/H2 fixes require us to verify that the requestor's spa
+    // matches the spa that owns the resource. We never trust the
+    // path segments — instead we re-fetch the canonical record from
+    // Firestore and compare the spaId server-side.
+    //
+    // Cost: one extra firestore.get per evaluated rule. This is
+    // acceptable for upload paths (low QPS) but we keep these
+    // helpers off the high-volume read paths for spa/therapist/
+    // service display imagery, which remain `allow read: if true`
+    // (those are intentionally public marketplace media).
+
+    // Returns the spaId for the requestor (from users/{uid}.spaData.spaId).
+    // Used to compare the requestor's spa with a target resource's spa.
+    function getMySpaId() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid))
+        .data.spaData.spaId;
+    }
+
+    // S1 (CRITICAL) FIX: removed `getServiceSpaId(serviceId)` helper.
+    // The global `/services/{id}` documents have NO `spaId` field —
+    // they are platform-managed catalog entries. The lookup therefore
+    // always returned undefined and the spa-owner branch in the
+    // service-image write rule was effectively dead code that hid the
+    // real (admin-only) policy. Spa-scoped service overrides now go
+    // through `/spa-services/{compositeId}/` where the spaId is
+    // encoded in the path segment, so no Firestore lookup is needed.
+
+    // Returns the spaId associated with a booking (from bookings/{id}.spaId).
+    // Used by H1 to scope booking-attachment reads to the booking's spa.
+    function getBookingSpaId(bookingId) {
+      return firestore.get(/databases/(default)/documents/bookings/$(bookingId))
+        .data.spaId;
+    }
+
+    // Returns the userId on a support ticket. N4 fix: only the
+    // ticket creator (or admin) may write attachments to that
+    // ticket — not any authenticated user.
+    function getTicketUserId(ticketId) {
+      return firestore.get(/databases/(default)/documents/support_tickets/$(ticketId))
+        .data.userId;
+    }
+
+    // ---- Filename hardening (N5) ----
+    //
+    // Pre-Phase-8 the filename regexes only validated the suffix
+    // (`.*\.(jpg|...)$`) which permitted control characters, slashes,
+    // null bytes, and `..` traversal sequences inside the basename.
+    // The Storage path layer is more forgiving than expected here —
+    // some characters survive into the object name and break
+    // download URL parsing or escape into other prefixes when the
+    // object is iterated.
+    //
+    // The hardened regex below enforces:
+    //   * Allowed chars only: [A-Za-z0-9_-]
+    //   * Length: 1..128 characters before the dot
+    //   * Allowed suffixes: jpg, jpeg, png, webp, pdf
+    //
+    // Notes:
+    //   * `gif` removed — animated GIFs were never used by the app
+    //     and were a vector for stored XSS via SVG-tunneled payloads
+    //     in older browsers.
+    //   * `svg` removed — SVG can carry inline JS. The /services/
+    //     match previously allowed it; it is now rejected and any
+    //     existing SVG service icons must be re-uploaded as PNG/WebP.
+    //   * Each call site separately enforces a contentType regex,
+    //     so an attacker can't smuggle a non-image MIME under an
+    //     image extension.
+    function validFilename(filename) {
+      return filename.matches('^[A-Za-z0-9_\\-]{1,128}\\.(jpg|jpeg|png|webp|pdf)$');
+    }
+
+    // Image-only variant (excludes .pdf) for paths that should not
+    // accept document uploads.
+    function validImageFilename(filename) {
+      return filename.matches('^[A-Za-z0-9_\\-]{1,128}\\.(jpg|jpeg|png|webp)$');
+    }
+
+    function maxSize(mb) {
+      return request.resource.size < mb * 1024 * 1024;
+    }
+
+    // ============================================================
+    // Storage Paths
+    // ============================================================
+
+    // User Profile Images
+    // S6 (HIGH): Read restricted to owner to prevent IDOR on PII avatars.
+    // UIs needing third-party avatars must use a backend callable that returns
+    // a short-lived signed URL (see docs/remediation/PHASE-1-BLOCKERS.md).
+    match /users/{userId}/profile/{filename} {
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId)
+        && validImageFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && maxSize(5);
+    }
+
+    // Spa Images — public marketplace media (cover, gallery, logo).
+    //
+    // H6 (HIGH) FIX: writes are now spa-scoped. Pre-fix, ANY spa_owner
+    // could overwrite ANY other spa's marketing imagery. The hardened
+    // rule requires the requestor to either be admin OR the spa_owner
+    // whose own spaId (from users/{uid}.spaData.spaId) matches the
+    // {spaId} path segment.
+    match /spas/{spaId}/{type}/{filename} {
+      allow read: if true;
+      allow write: if isAuthenticated()
+        && (
+          hasRole('admin')
+          || (hasRole('spa_owner') && getMySpaId() == spaId)
+        )
+        && validImageFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && type in ['featured', 'gallery', 'logo']
+        && maxSize(5);
+    }
+
+    // Therapist Images — already cross-checks `therapists/{id}.spaId`
+    // against the requestor's spaId. We keep that scope check and
+    // additionally tighten the filename regex.
+    match /therapists/{therapistId}/{type}/{filename} {
+      allow read: if true;
+      allow write: if isAuthenticated()
+        && (hasRole('spa_owner') || hasRole('spa_staff') || hasRole('admin'))
+        && (hasRole('admin')
+            || firestore.get(/databases/(default)/documents/therapists/$(therapistId)).data.spaId
+               == getMySpaId())
+        && validImageFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && type in ['profile', 'cover']
+        && maxSize(5);
+    }
+
+    // Service Images — global catalog
+    //
+    // S1 (CRITICAL) FIX: writes are now admin-only.
+    // The previous rule attempted a spa-owner branch via
+    // `getMySpaId() == getServiceSpaId(serviceId)`, but the global
+    // `services/{id}` documents have NO `spaId` field — they are
+    // platform-managed catalog entries. The lookup therefore always
+    // returned undefined, the equality always failed, and the only
+    // path that ever permitted a write was `hasRole('admin')`. The
+    // spa-owner branch was effectively dead code that hid the real
+    // policy and made it look more permissive than it was.
+    //
+    // Admin-only for global catalog. Per-spa overrides go through
+    // storage path /spa-services/{compositeId}/ (added below) so spa
+    // owners can upload their own per-service imagery without
+    // corrupting the canonical catalog assets.
+    //
+    // N5 (MEDIUM) FIX: filename regex tightened (no SVG, no path
+    // traversal characters); contentType allowlist no longer
+    // includes `image/svg+xml`.
+    match /services/{serviceId}/{filename} {
+      allow read: if true;
+      allow write: if isAuthenticated()
+        && hasRole('admin')
+        && validImageFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && maxSize(5);
+    }
+
+    // Per-spa service overrides
+    //
+    // Spa owners who want to ship their own imagery for a service
+    // (e.g. a different hero shot for a Swedish-massage entry) write
+    // here under a composite ID `<spaId>_<serviceId>`. The rule
+    // requires the path's spaId prefix to match the requestor's own
+    // spaId so cross-tenant writes are impossible.
+    match /spa-services/{compositeId}/{filename} {
+      allow read: if true;
+      allow write: if isAuthenticated()
+        && (
+          hasRole('admin')
+          || (
+            hasRole('spa_owner')
+            && compositeId.matches('^' + getMySpaId() + '_.+')
+          )
+        )
+        && validImageFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && maxSize(5);
+    }
+
+    // Booking Attachments
+    //
+    // H1 (CRITICAL) FIX: read access is now spa-scoped. Pre-Phase-8
+    // ANY user with role spa_owner / spa_staff could read EVERY
+    // customer's booking attachments at every other spa — a severe
+    // PII / cross-tenant data leak. The hardened rule requires the
+    // requestor to be:
+    //   * the booking's customer (isOwner(userId)), OR
+    //   * a platform admin, OR
+    //   * a spa_owner / spa_staff whose own spaId matches the
+    //     bookings/{id}.spaId of the booking under access.
+    //
+    // N5 (MEDIUM) FIX: filename regex tightened.
+    match /bookings/{bookingId}/{userId}/{filename} {
+      allow read: if isOwner(userId)
+        || hasRole('admin')
+        || (
+          (hasRole('spa_owner') || hasRole('spa_staff'))
+          && getMySpaId() == getBookingSpaId(bookingId)
+        );
+      allow write: if isOwner(userId)
+        && validFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)|application/pdf')
+        && maxSize(10);
+    }
+
+    // Support Ticket Attachments
+    //
+    // N4 (HIGH) FIX: writes are now scoped to the ticket's owner
+    // (or admin). Pre-Phase-8 any authenticated user could write
+    // attachments to any ticket — an attacker could pollute another
+    // user's support thread with adversarial files. The hardened
+    // rule cross-checks support_tickets/{ticketId}.userId.
+    //
+    // N5 (MEDIUM) FIX: filename regex tightened.
+    match /support/{ticketId}/{filename} {
+      allow read: if hasRole('admin')
+        || (isAuthenticated() && getTicketUserId(ticketId) == request.auth.uid);
+      // Parenthesise the identity branch so the file-shape checks
+      // (validFilename + contentType + maxSize) apply to BOTH the
+      // admin path AND the ticket-owner path. Without these parens,
+      // `&&` would bind tighter than `||` and admins could bypass
+      // the filename hardening.
+      allow write: if (
+          hasRole('admin')
+          || (isAuthenticated() && getTicketUserId(ticketId) == request.auth.uid)
+        )
+        && validFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)|application/pdf')
+        && maxSize(10);
+    }
+
+    // Verification Documents — already correctly owner/admin scoped.
+    match /verification/{type}/{userId}/{filename} {
+      allow read: if hasRole('admin') || isOwner(userId);
+      allow write: if isOwner(userId)
+        && (type == 'spa' || type == 'therapist')
+        && validFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)|application/pdf')
+        && maxSize(5);
+    }
+
+    // Temporary Uploads — uploadId == auth.uid keeps this self-scoped.
+    match /temp/{uploadId}/{filename} {
+      allow read: if isAuthenticated() && uploadId == request.auth.uid;
+      allow write: if isAuthenticated()
+        && uploadId == request.auth.uid
+        && validImageFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && maxSize(5);
+    }
+
+    // Review Photos — public read, owner-scoped write.
+    match /reviews/{reviewId}/{userId}/{filename} {
+      allow read: if true;
+      allow write: if isOwner(userId)
+        && validImageFilename(filename)
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && maxSize(5);
+    }
+  }
+}

@@ -1,0 +1,651 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============ Helper Functions ============
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isActiveUser(userId) {
+      let user = get(/databases/$(database)/documents/users/$(userId)).data;
+      return user != null && user.isActive == true;
+    }
+
+    function isCurrentUserActive() {
+      return isActiveUser(request.auth.uid);
+    }
+
+    // SECURITY: Role is read from the user's Firestore document.
+    // Admin role assignment must ONLY be done via the Firebase Admin SDK
+    // (server-side Cloud Functions) — never from client-writable fields.
+    // The users/update rule below prevents clients from changing their own role.
+    function getRole(userId) {
+      let user = get(/databases/$(database)/documents/users/$(userId)).data;
+      return user != null ? user.role : null;
+    }
+
+    function isAdmin() {
+      return getRole(request.auth.uid) == 'admin';
+    }
+
+    function isSpaOwner() {
+      return getRole(request.auth.uid) == 'spa_owner';
+    }
+
+    function isSpaStaff() {
+      return getRole(request.auth.uid) == 'spa_staff';
+    }
+
+    function getUserSpaId(userId) {
+      let user = get(/databases/$(database)/documents/users/$(userId)).data;
+      return user != null && user.spaData != null ? user.spaData.spaId : null;
+    }
+
+    function isSpaOwnerOf(spaId) {
+      return isAuthenticated() && isSpaOwner() && getUserSpaId(request.auth.uid) == spaId;
+    }
+
+    function isSpaStaffOf(spaId) {
+      return isAuthenticated() && getUserSpaId(request.auth.uid) == spaId && isSpaStaff();
+    }
+
+    function canAccessSpa(spaId) {
+      return isAuthenticated() &&
+        (isSpaOwnerOf(spaId) || isSpaStaffOf(spaId) || isAdmin());
+    }
+
+    // Phase 1 (Stripe removal, 2026-05-02): the legacy state machine had a
+    // dedicated `payment_pending` / `payment_failed` branch driven by
+    // Stripe webhooks and a `draft` start state created by the old client
+    // path. Those are gone — bookings now jump straight to 'confirmed'
+    // (pay-at-spa) and proceed through en_route / in_progress / completed
+    // (or cancelled / no_show at any step).
+    function isValidStatusTransition(from, to) {
+      return (from == 'confirmed' && to == 'en_route') ||
+             (from == 'confirmed' && to == 'in_progress') ||
+             (from == 'confirmed' && to == 'cancelled') ||
+             (from == 'confirmed' && to == 'no_show') ||
+             (from == 'en_route' && to == 'in_progress') ||
+             (from == 'en_route' && to == 'cancelled') ||
+             (from == 'en_route' && to == 'no_show') ||
+             (from == 'in_progress' && to == 'completed') ||
+             (from == 'in_progress' && to == 'cancelled');
+    }
+
+    function isBookingOwner(bookingId) {
+      let booking = get(/databases/$(database)/documents/bookings/$(bookingId)).data;
+      return booking != null && booking.userId == request.auth.uid;
+    }
+
+    // ============ Collections Rules ============
+
+    // Users Collection
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+
+      // Registration: only the newly authenticated user can create their own document.
+      // The role must be 'customer' (privilege escalation prevention).
+      // Required fields must be present. The uid in the document must match the auth uid.
+      allow create: if isAuthenticated()
+        && request.auth.uid == userId
+        && request.resource.data.role == 'customer'
+        && request.resource.data.keys().hasAll(['profile', 'role', 'isActive']);
+
+      // Update: users may only change safe personal/preference fields.
+      // CRITICAL: 'role', 'spaData', 'wallet', 'isActive', 'permissions' are NOT
+      // in the allowed set — only Cloud Functions (Admin SDK) can promote a
+      // user, mutate wallet balance, deactivate accounts, or grant permissions.
+      // Phase 4 / 4A: `defaultAddressId` and `addressCount` are denormalized
+      // pointers maintained by the address callables (Admin SDK) — kept in
+      // the allowlist so that the callables' `tx.set(userRef, {...}, {merge})`
+      // works even when rules are evaluated defensively.
+      // Phase 8.5: tightened — the previous allowlist let owners overwrite
+      // their full `customerData` map (incl. server-managed fields like
+      // bookingCount, totalSpent). Customer-writable surface is now scoped
+      // narrowly via the customerDataAllowedSubkeys() check below.
+      allow update: if (isOwner(userId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['profile', 'emailVerified', 'phoneVerified', 'preferences',
+                      'customerData', 'updatedAt', 'lastLoginAt',
+                      'defaultAddressId', 'addressCount'])
+        && (!('customerData' in request.resource.data.diff(resource.data).affectedKeys())
+            || request.resource.data.customerData.diff(resource.data.get('customerData', {}))
+                .affectedKeys()
+                .hasOnly(['favorites', 'savedAddresses', 'notificationPrefs', 'fcmTokens'])))
+        || isAdmin();
+
+      allow delete: if isOwner(userId) || isAdmin();
+
+      // User favorites subcollection
+      match /favorites/{favoriteId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // ===== Phase 4 / 4A: addresses + migrations =====
+      // `users/{uid}/addresses/{addressId}` — source of truth for the
+      // user's saved addresses. Owner may read. All writes go through
+      // the addAddress/updateAddress/deleteAddress/setDefaultAddress
+      // callables (Admin SDK bypasses rules).
+      match /addresses/{addressId} {
+        allow read: if isOwner(userId);
+        allow create: if false; // Cloud Functions only (addAddress callable)
+        allow update: if false; // Cloud Functions only (updateAddress / setDefaultAddress)
+        allow delete: if false; // Cloud Functions only (deleteAddress)
+      }
+      // ===== end 4A =====
+    }
+
+    // Spas Collection
+    match /spas/{spaId} {
+      allow read: if isCurrentUserActive();
+      allow create: if isAuthenticated() && isSpaOwner()
+        && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isSpaOwnerOf(spaId) || isAdmin();
+      allow delete: if isSpaOwnerOf(spaId) || isAdmin();
+
+      // Spa services subcollection
+      match /services/{serviceId} {
+        allow read: if isCurrentUserActive();
+        allow create, update, delete: if canAccessSpa(spaId);
+      }
+
+      // Spa therapists subcollection
+      match /therapists/{therapistId} {
+        allow read: if isCurrentUserActive();
+        allow create, update, delete: if canAccessSpa(spaId);
+      }
+
+      // Spa availability subcollection
+      match /availability/{availabilityId} {
+        allow read: if isCurrentUserActive();
+        allow create, update, delete: if canAccessSpa(spaId);
+      }
+    }
+
+    // Services Collection (Global catalog)
+    match /services/{serviceId} {
+      allow read: if isCurrentUserActive();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Spa Services Collection (Spa-specific overrides)
+    match /spa_services/{compositeId} {
+      function extractSpaId() {
+        return compositeId.split('_')[0];
+      }
+
+      allow read: if isCurrentUserActive();
+      allow create: if canAccessSpa(extractSpaId());
+      allow update: if canAccessSpa(extractSpaId());
+      allow delete: if canAccessSpa(extractSpaId());
+    }
+
+    // Therapists Collection
+    match /therapists/{therapistId} {
+      allow read: if isCurrentUserActive();
+
+      allow create: if isAuthenticated() && canAccessSpa(request.resource.data.spaId);
+      allow update: if canAccessSpa(resource.data.spaId);
+      allow delete: if canAccessSpa(resource.data.spaId);
+    }
+
+    // Bookings Collection
+    match /bookings/{bookingId} {
+      allow read: if isAuthenticated() &&
+        (resource.data.userId == request.auth.uid ||
+         isSpaOwnerOf(resource.data.spaId) ||
+         isSpaStaffOf(resource.data.spaId) ||
+         isAdmin());
+
+      // Customer-initiated bookings.
+      // CRITICAL (B8 + Phase 1 Stripe removal, 2026-05-02): the allowlist
+      // below is INTENTIONALLY narrow.
+      //   * userId MUST equal the authenticated uid.
+      //   * bookingStatus MUST be 'confirmed' on create — there is no
+      //     'draft' / 'payment_pending' phase any more (pay-at-spa only).
+      //     The createBookingDraft callable (Admin SDK) is still the
+      //     production write path; this rule guards against direct-client
+      //     writes if that ever ships.
+      //   * `pricing`, `services`, `addons`, `statusHistory`, `createdBy`,
+      //     `isActive`, `reminderSent` are server-controlled and must NOT
+      //     appear in a client-written create payload — the authoritative
+      //     values are written by the createBookingDraft callable via the
+      //     Admin SDK (which bypasses these rules). Allowing `pricing`
+      //     here previously let a malicious client set `pricing.total: 1`
+      //     and checkout for ₹1.
+      //   * `voucherCode` is NOT in the customer-writable surface — voucher
+      //     application goes through the `redeemVoucher` callable (Admin
+      //     SDK), which atomically recomputes pricing from the authoritative
+      //     catalog. Allowing it client-side previously let a malicious
+      //     client mark a booking as voucher-redeemed without the server
+      //     having validated the code or recomputed totals.
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.bookingStatus == 'confirmed' &&
+        request.resource.data.keys().hasOnly([
+          'userId', 'spaId', 'therapistId', 'serviceIds',
+          'slot', 'bookingStatus', 'notes', 'specialRequests',
+          'createdAt', 'updatedAt',
+          // Phase 2: mandatory-location-capture allowlist additions.
+          // Future-proofing — Admin SDK currently bypasses these rules
+          // (createBookingDraft writes via admin), but a future direct-
+          // client write path is anticipated. These fields are
+          // write-once-via-callable; the customer update allowlist
+          // (below) is INTENTIONALLY NOT extended.
+          'bookingLocation', 'customerLocation'
+        ]);
+
+      // Update: customers may only change notes/specialRequests.
+      // Spa owners/staff may only update operational status fields.
+      // Admin can update anything.
+      // Phase 1 (2026-05-02): `voucherCode` removed from the customer-
+      // writable allowlist — voucher redemption is the redeemVoucher
+      // callable's job (Admin SDK).
+      allow update: if isAuthenticated() && (
+        // Booking owner: limited field updates only
+        (resource.data.userId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['notes', 'specialRequests', 'updatedAt'])) ||
+        // Spa owner/staff: can update operational fields with valid status transitions
+        ((isSpaOwnerOf(resource.data.spaId) || isSpaStaffOf(resource.data.spaId)) &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['bookingStatus', 'statusHistory', 'updatedAt', 'cancellation']) &&
+          isValidStatusTransition(resource.data.bookingStatus, request.resource.data.bookingStatus)) ||
+        // Admin: unrestricted
+        isAdmin()
+      );
+
+      allow delete: if isAdmin();
+
+      // Booking notes subcollection
+      match /notes/{noteId} {
+        allow read: if isAuthenticated() && (
+          isAdmin() ||
+          isBookingOwner(bookingId) ||
+          isSpaOwnerOf(get(/databases/$(database)/documents/bookings/$(bookingId)).data.spaId) ||
+          isSpaStaffOf(get(/databases/$(database)/documents/bookings/$(bookingId)).data.spaId)
+        );
+        allow create: if isAuthenticated() && (
+          isAdmin() ||
+          isBookingOwner(bookingId) ||
+          canAccessSpa(get(/databases/$(database)/documents/bookings/$(bookingId)).data.spaId)
+        );
+      }
+    }
+
+    // Availability Collection (Cache - read-only for clients)
+    match /availability/{compositeId} {
+      allow read: if isCurrentUserActive();
+      allow write: if false; // Managed by Cloud Functions only
+    }
+
+    // Reviews Collection
+    match /reviews/{reviewId} {
+      allow read: if isCurrentUserActive();
+
+      // CRITICAL: enforce that the userId in the new document matches the authenticated user.
+      // This prevents one user from submitting a review attributed to another user.
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid;
+
+      allow update: if isOwner(resource.data.userId) || isAdmin();
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+    }
+
+    // Transactions Collection — REMOVED (Phase 1, Stripe removal, 2026-05-02).
+    // All `transactions/*` reads/writes funnelled through the Stripe
+    // payments path. Pay-at-spa has no online-payment ledger, so the
+    // collection rule is gone. Any residual docs in the live database
+    // become inert — they fall through to the Firestore default-deny
+    // (no read, no write) until the migration sweep lands.
+
+    // Payouts Collection
+    match /payouts/{payoutId} {
+      allow read: if isSpaOwnerOf(resource.data.spaId) || isAdmin();
+      allow write: if false; // Managed by Cloud Functions only
+    }
+
+    // ===== 4C: notifications =====
+    // Top-level `notifications` collection — feed UI consumes this directly.
+    // Strict contract (PHASE_4.md §3.4, NOTIFICATIONS_SCHEMA.md):
+    //   - list/get: owner only (or admin for support)
+    //   - update:   owner only, AND only the `readAt` field may be mutated.
+    //               This preserves the audit trail: title/body/sentAt are
+    //               immutable from the client. `markAllNotificationsRead`
+    //               callable uses Admin SDK and bypasses this rule to set
+    //               `read: true` on many docs at once.
+    //   - create:   server-only (sendMultiChannelNotification + dispatchBroadcast)
+    //   - delete:   server-only (cleanupOldNotifications scheduled job)
+    match /notifications/{notificationId} {
+      allow list, get: if isAuthenticated()
+        && (request.auth.uid == resource.data.userId || isAdmin());
+
+      allow update: if isAuthenticated()
+        && request.auth.uid == resource.data.userId
+        && request.resource.data.diff(resource.data)
+            .affectedKeys().hasOnly(['readAt']);
+
+      allow create: if false; // Cloud Functions only (Admin SDK)
+      allow delete: if false; // Cloud Functions only (cleanupOldNotifications)
+    }
+
+    // `broadcast_jobs/{broadcastId}` — idempotency journal for
+    // dispatchBroadcast. Admin read for operational visibility; all
+    // writes go through the callable (Admin SDK).
+    match /broadcast_jobs/{broadcastId} {
+      allow read: if isAdmin();
+      allow write: if false; // Cloud Functions only (dispatchBroadcast)
+    }
+    // ===== end 4C =====
+
+    // Vouchers Collection
+    match /vouchers/{voucherId} {
+      allow read: if isCurrentUserActive();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // User Vouchers Collection
+    match /user_vouchers/{compositeId} {
+      function extractUserId() {
+        return compositeId.split('_')[0];
+      }
+
+      allow read: if isOwner(extractUserId());
+      allow write: if false; // Managed by Cloud Functions only
+    }
+
+    // Wallets Collection
+    match /wallets/{walletId} {
+      allow read: if isOwner(resource.data.userId) || isAdmin();
+      allow write: if false; // Managed by Cloud Functions only
+
+      // Wallet transactions subcollection
+      match /transactions/{transactionId} {
+        // Read parent wallet doc to get userId for ownership check
+        allow read: if isAuthenticated() && (
+          isOwner(get(/databases/$(database)/documents/wallets/$(walletId)).data.userId) ||
+          isAdmin()
+        );
+        allow write: if false; // Managed by Cloud Functions only
+      }
+    }
+
+    // Support Tickets Collection
+    match /support_tickets/{ticketId} {
+      allow read: if isAuthenticated() &&
+        (resource.data.userId == request.auth.uid ||
+         isSpaOwnerOf(resource.data.spaId) ||
+         isSpaStaffOf(resource.data.spaId) ||
+         isAdmin());
+
+      // CRITICAL: bind the userId in the created document to the authenticated user.
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid;
+
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+
+      // Ticket messages subcollection
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && (
+          isAdmin() ||
+          request.auth.uid == get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId ||
+          canAccessSpa(get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.spaId)
+        );
+        allow create: if isAuthenticated() && (
+          isAdmin() ||
+          request.auth.uid == get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId ||
+          canAccessSpa(get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.spaId)
+        );
+      }
+    }
+
+    // Analytics Collection
+    match /analytics/{compositeId} {
+      allow read: if isAdmin();
+      allow write: if false; // Managed by Cloud Functions only
+    }
+
+    // Flags Collection (Feature Flags)
+    match /flags/{flagId} {
+      allow read: if isCurrentUserActive();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Audit Logs Collection
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false; // Write-only via Cloud Functions
+    }
+
+    // ===== Phase 4 / 4A: addresses + migrations =====
+    // Deletion Jobs — journal for cascadeDeleteUserData (Phase 3 / 3A).
+    // Readable by admins + by the owning user (for UX progress display).
+    // Writes are Cloud Functions only.
+    match /deletion_jobs/{userId} {
+      allow read: if isAdmin() || isOwner(userId);
+      allow write: if false;
+    }
+
+    // Address Migrations — journal for `migrateAddressesToSubcollection`.
+    // Readable by the owning user (optional client-side "already migrated?"
+    // check) and admins. Writes are Cloud Functions only.
+    match /address_migrations/{userId} {
+      allow read: if isAdmin() || isOwner(userId);
+      allow write: if false;
+    }
+    // ===== end 4A =====
+
+    // ===== 4B: geocode cache =====
+    // `geocode_cache/{cellId}` is a server-only cache of reverse-geocoded
+    // Google Maps results, keyed by a 4-decimal lat/lng bucket.
+    //
+    // Clients MUST NEVER touch this collection directly — they call the
+    // `reverseGeocode` Cloud Function which uses the Admin SDK (which
+    // bypasses these rules) to read and write. Denying every client access
+    // here protects the cached data and prevents clients from poisoning
+    // the cache with fake results.
+    match /geocode_cache/{cellId} {
+      allow read: if false;
+      allow write: if false;
+    }
+    // ===== end 4B =====
+
+    // Chats Collection (customer support / bot chats)
+    //
+    // SEC-L1: Cap message body size at 2000 characters (roughly the
+    // Firestore-document-size sweet spot for a single turn) so a single
+    // compromised client can't stuff the datastore with arbitrarily long
+    // payloads. The size() fn returns UTF-16 code units — adequate for
+    // abusive-length detection even if the content is non-Latin.
+    match /chats/{chatId} {
+      allow read: if isAuthenticated() && chatId == request.auth.uid;
+      allow write: if isAuthenticated()
+        && chatId == request.auth.uid
+        && (!('body' in request.resource.data)
+            || request.resource.data.body is string
+                && request.resource.data.body.size() < 2000);
+
+      // Messages subcollection
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && chatId == request.auth.uid;
+        allow write: if isAuthenticated()
+          && chatId == request.auth.uid
+          && (!('body' in request.resource.data)
+              || request.resource.data.body is string
+                  && request.resource.data.body.size() < 2000);
+      }
+    }
+
+    // Carts Collection (persisted cart for logged-in users)
+    //
+    // Size guard added 2026-04-26 (NEEDS_WORK plan §3.4): WRITE-only.
+    // Existing oversized docs stay readable (grandfather clause); future
+    // writes that violate the cap are rejected with permission-denied.
+    //
+    // Cart shape (frontend/src/lib/firebase-client/cart.ts saveCart):
+    //   { items: CartItem[], updatedAt: string }
+    //
+    // The only unbounded vector is `items`. A spa cart of 50+ services is
+    // not a real-user shape — bookings group services by spa/therapist
+    // and downstream booking validation will reject them anyway. Capping
+    // at 50 leaves a comfortable headroom over typical (1–5) usage while
+    // bounding the worst-case doc size at ~10–15 KB even with rich
+    // CartItemView fields (categoryName, image, etc.).
+    match /carts/{userId} {
+      allow read: if isAuthenticated() && userId == request.auth.uid;
+      allow write: if isAuthenticated() && userId == request.auth.uid
+        && (!('items' in request.resource.data)
+            || (request.resource.data.items is list
+                && request.resource.data.items.size() < 50));
+    }
+
+    // Registration Requests Collection (deferred spa owner approval)
+    match /registrationRequests/{requestId} {
+      allow read: if isAdmin() || isOwner(resource.data.userId);
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ====== Phase 8.5: Partner Registrations (marketing form) ======
+    // `frontend/src/app/partner/page.tsx` writes prospective spa-partner
+    // applications here via `addDoc`. The form is intentionally available to
+    // unauthenticated visitors (it's a marketing landing page), so we cannot
+    // bind to `request.auth.uid`.
+    //
+    // Hardening:
+    //   * Create-only — no read, no update, no delete from clients.
+    //   * Required-fields whitelist mirrors the form's Zod schema.
+    //   * `createdAt` MUST equal `request.time` — prevents replay/forgery
+    //     and lets analytics rely on a server-trusted timestamp.
+    //   * `status` MUST be 'pending' — prevents a malicious client from
+    //     pre-approving its own application.
+    //   * Field-size caps stop a single client from stuffing the datastore.
+    //
+    // FOLLOW-UP (TODO Phase 8.6): replace with a `submitPartnerApplication`
+    // callable so we can add CAPTCHA / App Check / per-IP rate limits and
+    // emit a notification to the partnerships team. Tracked separately.
+    match /partner_registrations/{registrationId} {
+      allow read, update, delete: if isAdmin();
+      allow create: if request.resource.data.keys().hasAll(
+            ['spaName', 'ownerName', 'phone', 'email', 'city',
+             'staffCount', 'services', 'status', 'createdAt'])
+        && request.resource.data.keys().hasOnly(
+            ['spaName', 'ownerName', 'phone', 'email', 'city',
+             'staffCount', 'services', 'details', 'status', 'createdAt'])
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.spaName is string
+        && request.resource.data.spaName.size() >= 2
+        && request.resource.data.spaName.size() <= 200
+        && request.resource.data.ownerName is string
+        && request.resource.data.ownerName.size() >= 2
+        && request.resource.data.ownerName.size() <= 200
+        && request.resource.data.phone is string
+        && request.resource.data.phone.matches('^[6-9][0-9]{9}$')
+        && request.resource.data.email is string
+        && request.resource.data.email.size() <= 320
+        && request.resource.data.email.matches('^[^@]+@[^@]+\\.[^@]+$')
+        && request.resource.data.city is string
+        && request.resource.data.city.size() <= 100
+        && request.resource.data.staffCount is string
+        && request.resource.data.staffCount.size() <= 20
+        && request.resource.data.services is list
+        && request.resource.data.services.size() >= 1
+        && request.resource.data.services.size() <= 50
+        && (!('details' in request.resource.data)
+            || (request.resource.data.details is string
+                && request.resource.data.details.size() <= 2000));
+    }
+    // ====== end Phase 8.5 ======
+
+    // ====== B-L3: Server-only collections — explicit deny-by-default ======
+    // Being explicit (vs relying on the no-match-means-deny default) makes
+    // it obvious to future auditors that these collections are intentional
+    // server-only state and protects against a future global rule relaxing
+    // the default.
+
+    // `addons` is a curated catalog: clients need to read to price up
+    // their basket, but only Cloud Functions may write.
+    match /addons/{addonId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
+    // Cloud Tasks scheduling mirrors — server-only journals.
+    match /scheduled_reminders/{docId} {
+      allow read, write: if false;
+    }
+    match /scheduled_notifications/{docId} {
+      allow read, write: if false;
+    }
+
+    // Real-time UI mirror (populated by event triggers).
+    match /realtime_updates/{docId} {
+      allow read, write: if false;
+    }
+
+    // Idempotency sentinels — read/write strictly via Admin SDK handlers.
+    match /_processedEvents/{eventId} {
+      allow read, write: if false;
+    }
+    // _processedStripeEvents — REMOVED (Phase 1, Stripe removal, 2026-05-02).
+    // The handleStripeWebhook handler is gone, so no service writes to this
+    // sentinel any more. Residual docs (if any) are protected by the
+    // collection-level default-deny.
+
+    // Phase 7 — signup-availability bloom filters.
+    //
+    // `_meta/signupBloom` stores a probabilistic membership filter for
+    // the current `users` collection (email + phone). Reads are gated
+    // behind `request.auth != null` so the doc is NOT a public
+    // enumeration oracle — even though it is probabilistic (~1% FPR),
+    // an unauthenticated attacker could still bulk-probe candidate
+    // emails by reading the raw bit buffer once and computing
+    // membership offline against millions of candidates.
+    //
+    // The signup form goes through the `checkSignupAvailability`
+    // callable, which runs server-side via the Admin SDK and bypasses
+    // these rules entirely — so locking the doc to deny-by-default
+    // does NOT break the pre-auth signup UX. The frontend MUST always
+    // go through the callable; it must never read `/_meta/signupBloom`
+    // directly.
+    //
+    // Patch 9D (2026-05-02): tightened from `request.auth != null` →
+    // `if false` because even authenticated reads gave attackers a
+    // membership oracle they could replay offline against millions of
+    // candidate emails (~1% FPR is not enough to make that safe). The
+    // Admin SDK bypass keeps the legitimate path intact.
+    //
+    // Writes remain server-only via the `rebuildSignupBloomFilter`
+    // scheduled job (Admin SDK).
+    match /_meta/signupBloom {
+      allow read: if false;
+      allow write: if false;
+    }
+    // Other `_meta/*` documents (none today, but reserved) stay deny-by-default.
+    match /_meta/{docId} {
+      allow read, write: if false;
+    }
+
+    // Rate limit counters — read/write strictly via Admin SDK via
+    // utils/withRateLimit.
+    match /_rateLimits/{docId} {
+      allow read, write: if false;
+    }
+    // ====== end B-L3 ======
+  }
+}

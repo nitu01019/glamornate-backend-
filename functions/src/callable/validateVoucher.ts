@@ -8,7 +8,7 @@ import { createLogger } from '../utils/logger';
 import {
   ValidateVoucherInputSchema as ValidateVoucherSchema,
   type ValidateVoucherInput,
-} from '../lib/contracts';
+} from '../shared/contracts';
 
 const logger = createLogger('validateVoucher');
 

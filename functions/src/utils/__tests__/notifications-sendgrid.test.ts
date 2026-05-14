@@ -65,7 +65,7 @@ describe('sendEmailNotification — M-NOTIFY restore', () => {
 
     // Set env before importing so ensureSendGrid() sees the key
     process.env.SENDGRID_API_KEY = 'SG.test';
-    process.env.SENDGRID_FROM_EMAIL = 'no-reply@glamornate.test';
+    process.env.SENDGRID_FROM_EMAIL = 'no-reply@glamornate.com';
     process.env.SENDGRID_FROM_NAME = 'Glamornate';
 
     const mod = await import('../notifications');

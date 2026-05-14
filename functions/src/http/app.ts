@@ -11,9 +11,22 @@
 import { randomUUID } from 'crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import { corsMiddleware } from './middleware/cors';
-import { verifyAppCheck } from './middleware/appCheck';
-import { publicRateLimit, authedRateLimit } from './middleware/rateLimit';
-import { errResponse, okResponse } from '../lib/contracts';
+import { verifyAppCheck } from '../auth/app-check';
+import { publicRateLimit } from './middleware/rateLimit';
+import { errResponse, okResponse } from '../shared/contracts';
+
+// A-6-10: refuse to start when App Check debug bypass is enabled in any
+// production-shaped environment. K_SERVICE is set by Cloud Run / Cloud
+// Functions Gen2 at runtime; NODE_ENV='production' covers Next.js + locally
+// triggered prod builds. Keeps the bypass strictly scoped to dev/test.
+if (
+  process.env.ALLOW_APP_CHECK_DEBUG === 'true' &&
+  (process.env.NODE_ENV === 'production' || !!process.env.K_SERVICE)
+) {
+  throw new Error(
+    'SECURITY: ALLOW_APP_CHECK_DEBUG must not be set in production. Refusing to start.',
+  );
+}
 
 import { categoriesRouter } from './routes/services.categories';
 import { mostBookedRouter } from './routes/services.mostBooked';
@@ -69,8 +82,12 @@ export function buildApp(options: BuildAppOptions = {}): Express {
   // Frontend posts here from `cart/page.tsx` before routing to /booking.
   v1.use(cartRouter);
 
-  // Auth-required routes. Extra per-UID rate limit layered on top.
-  v1.use(authedRateLimit((req) => req.auth?.uid));
+  // F-CG-01 (2026-05-11): `authedRateLimit` previously ran at router level
+  // BEFORE per-route `verifyAuth()` could populate `req.auth.uid` — the
+  // key generator's `req.auth?.uid` was always undefined, so the limiter
+  // silently fell back to per-IP. Per-UID isolation was nonexistent for the
+  // authed surface. Now applied per-route INSIDE bookingsRouter, AFTER
+  // verifyAuth (see backend/functions/src/http/routes/bookings.ts).
   v1.use(bookingsRouter);
 
   app.use('/api/v1', v1);

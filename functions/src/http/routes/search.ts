@@ -11,7 +11,7 @@ import {
   okResponse,
   type SpaCategory,
   type UnifiedSearchResult,
-} from '../../lib/contracts';
+} from '../../shared/contracts';
 import { validate, getValidated } from '../middleware/validate';
 
 export const searchRouter = Router();

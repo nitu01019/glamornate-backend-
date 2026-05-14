@@ -111,12 +111,15 @@ async function clearCollection(name: string): Promise<void> {
   await batch.commit();
 }
 
-async function seedUsers(opts: { withAdmin?: boolean; withPrimary?: boolean; withSecondary?: boolean; withNonAdmin?: boolean } = {}): Promise<void> {
+async function seedUsers(opts: { withAdmin?: boolean; withPrimary?: boolean; withSecondary?: boolean; withNonAdmin?: boolean; secondaryActive?: boolean } = {}): Promise<void> {
   const {
     withAdmin = true,
     withPrimary = true,
     withSecondary = true,
     withNonAdmin = false,
+    // α8-6: default secondary as inactive — that's the precondition the
+    // hardened callable enforces.
+    secondaryActive = false,
   } = opts;
   const ops: Promise<unknown>[] = [];
   if (withAdmin) {
@@ -150,7 +153,7 @@ async function seedUsers(opts: { withAdmin?: boolean; withPrimary?: boolean; wit
     ops.push(
       db.collection('users').doc(SECONDARY_UID).set({
         role: 'customer',
-        isActive: true,
+        isActive: secondaryActive,
         email: 'secondary@example.com',
       }),
     );
@@ -200,7 +203,14 @@ describeIfEmulator('mergeUserAccounts (emulator)', () => {
       clearCollection('users'),
       clearCollection('bookings'),
       clearCollection('notifications'),
+      clearCollection('wallet'),
+      clearCollection('walletTransactions'),
+      clearCollection('reviews'),
+      clearCollection('userVouchers'),
+      clearCollection('supportTickets'),
+      clearCollection('fcmTokens'),
       clearCollection('audit_logs'),
+      clearCollection('merge_jobs'),
     ]);
   });
 
@@ -232,6 +242,11 @@ describeIfEmulator('mergeUserAccounts (emulator)', () => {
     expect(secondary.role).toBe('_merged');
     expect(secondary.mergedInto).toBe(PRIMARY_UID);
     expect(secondary.isActive).toBe(false);
+
+    // α8-8: journal entry must be `completed` after a successful merge.
+    const journalSnap = await db.collection('merge_jobs').doc(SECONDARY_UID).get();
+    expect(journalSnap.exists).toBe(true);
+    expect(journalSnap.data()!.status).toBe('completed');
   });
 
   it('non-admin caller is rejected with permission-denied', async () => {
@@ -271,6 +286,138 @@ describeIfEmulator('mergeUserAccounts (emulator)', () => {
     await expect(handler(validInput(), ctx(ADMIN_UID))).rejects.toMatchObject({
       code: 'not-found',
       details: { error: 'USER_NOT_FOUND' },
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // α8-5 — TOCTOU: admin demoted mid-flight aborts subsequent destructive work
+  // ---------------------------------------------------------------------------
+  it('α8-5: aborts with permission-denied when admin is demoted mid-merge', async () => {
+    await seedUsers();
+    // Seed enough bookings to force two chunks (>400). Each chunk is wrapped
+    // in a transaction with a fresh admin re-check; demoting between chunks
+    // must abort the merge.
+    // For test runtime, just seed a handful and demote BEFORE invoking — the
+    // transactional re-check inside the first chunk sees the demotion and
+    // throws. (The "between chunks" timing is the same code path.)
+    await seedBookingsForSecondary(3);
+
+    // Demote admin to customer before invoking
+    await db.collection('users').doc(ADMIN_UID).update({ role: 'customer' });
+
+    await expect(handler(validInput(), ctx(ADMIN_UID))).rejects.toMatchObject({
+      code: 'permission-denied',
+    });
+
+    // Verify bookings were NOT reassigned
+    const stillSecondarySnap = await db
+      .collection('bookings')
+      .where('userId', '==', SECONDARY_UID)
+      .get();
+    expect(stillSecondarySnap.size).toBe(3);
+  });
+
+  // ---------------------------------------------------------------------------
+  // α8-6 — isActive precondition: refuse merge of active secondary user
+  // ---------------------------------------------------------------------------
+  it('α8-6: rejects failed-precondition with SECONDARY_USER_STILL_ACTIVE when secondary.isActive=true', async () => {
+    await seedUsers({ secondaryActive: true });
+
+    await expect(handler(validInput(), ctx(ADMIN_UID))).rejects.toMatchObject({
+      code: 'failed-precondition',
+      details: { error: 'SECONDARY_USER_STILL_ACTIVE' },
+    });
+
+    // Verify no journal entry was written on precondition failure
+    const journalSnap = await db.collection('merge_jobs').doc(SECONDARY_UID).get();
+    expect(journalSnap.exists).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // α8-7 — dynamic collections: ALL USER_KEYED_COLLECTIONS get swept
+  // ---------------------------------------------------------------------------
+  it('α8-7: sweeps every collection in USER_KEYED_COLLECTIONS, not just bookings/notifications', async () => {
+    await seedUsers();
+
+    // Seed one doc in each user-keyed collection. Each doc keyed by the
+    // secondary uid must be reassigned to the primary.
+    const { USER_KEYED_COLLECTIONS } = await import('../shared/contracts/auth');
+    const ops: Promise<unknown>[] = [];
+    for (const col of USER_KEYED_COLLECTIONS) {
+      ops.push(
+        db.collection(col).doc(`${col}-doc-1`).set({
+          userId: SECONDARY_UID,
+          payload: 'value',
+        }),
+      );
+    }
+    await Promise.all(ops);
+
+    const result = await handler(validInput(), ctx(ADMIN_UID));
+
+    expect(result.success).toBe(true);
+
+    // Every collection should report 1 reassigned doc.
+    for (const col of USER_KEYED_COLLECTIONS) {
+      expect(result.counters[col]).toBe(1);
+      const snap = await db.collection(col).doc(`${col}-doc-1`).get();
+      const data = snap.data()!;
+      expect(data.userId).toBe(PRIMARY_UID);
+      expect(data._mergedFrom).toBe(SECONDARY_UID);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // α8-8 — merge_jobs journal: status transitions + idempotent replay
+  // ---------------------------------------------------------------------------
+  it('α8-8: writes merge_jobs journal and short-circuits idempotent replay', async () => {
+    await seedUsers();
+    await seedBookingsForSecondary(2);
+
+    const firstResult = await handler(validInput(), ctx(ADMIN_UID));
+    expect(firstResult.success).toBe(true);
+
+    // Journal must show completed with the counters baked in.
+    const journalSnap = await db.collection('merge_jobs').doc(SECONDARY_UID).get();
+    expect(journalSnap.exists).toBe(true);
+    const journal = journalSnap.data()!;
+    expect(journal.status).toBe('completed');
+    expect(journal.primaryUid).toBe(PRIMARY_UID);
+    expect(journal.secondaryUid).toBe(SECONDARY_UID);
+    expect(journal.counters.bookings).toBe(2);
+    expect(Array.isArray(journal.completedCollections)).toBe(true);
+    expect(journal.completedCollections).toContain('bookings');
+
+    // Replay: same input must short-circuit to `alreadyMerged: true`.
+    const replayResult = (await handler(validInput(), ctx(ADMIN_UID))) as unknown as {
+      success: boolean;
+      alreadyMerged?: boolean;
+      counters: Record<string, number>;
+    };
+    expect(replayResult.success).toBe(true);
+    expect(replayResult.alreadyMerged).toBe(true);
+    expect(replayResult.counters.bookings).toBe(2);
+  });
+
+  it('α8-8: rejects in-flight concurrent invocation with MERGE_IN_FLIGHT', async () => {
+    await seedUsers();
+
+    // Pre-seed a fresh in_progress journal entry to simulate a concurrent
+    // merge happening right now.
+    await db.collection('merge_jobs').doc(SECONDARY_UID).set({
+      status: 'in_progress',
+      primaryUid: PRIMARY_UID,
+      secondaryUid: SECONDARY_UID,
+      reason: 'concurrent test',
+      startedAt: admin.firestore.FieldValue.serverTimestamp(),
+      startedAtMillis: Date.now(),
+      attemptedCollections: [],
+      completedCollections: [],
+    });
+
+    await expect(handler(validInput(), ctx(ADMIN_UID))).rejects.toMatchObject({
+      code: 'failed-precondition',
+      details: { error: 'MERGE_IN_FLIGHT' },
     });
   });
 });

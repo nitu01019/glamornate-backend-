@@ -290,17 +290,23 @@ export async function calculateAvailabilityForDate(
   const spa = spaDoc.data()! as SpaDocData;
   const spaIdValue = spaDoc.id;
 
-  // Get day of week
+  // Get day of week. Operating hours docs in the wild use BOTH short ("mon")
+  // and long ("monday") keys depending on which seed populated them — look
+  // up both forms so we don't surface "no slots" just because of a key mismatch.
   const [year, month, day] = date.split('-').map(Number);
   const dateObj = new Date(year, month - 1, day);
-  const dayOfWeek = dateObj.toLocaleDateString('en-US', { weekday: 'short' }).toLowerCase();
+  const dowShort = dateObj.toLocaleDateString('en-US', { weekday: 'short' }).toLowerCase();
+  const dowLong = dateObj.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+  const dayHours =
+    spa.operatingHours?.[dowShort] ?? spa.operatingHours?.[dowLong];
 
   // Check if spa is open on this day
-  if (!spa.operatingHours?.[dayOfWeek]?.isOpen) {
+  if (!dayHours?.isOpen) {
     return;
   }
 
-  const { open: openStr, close: closeStr } = spa.operatingHours[dayOfWeek];
+  const { open: openStr, close: closeStr } = dayHours;
+  const dayOfWeek = dowShort;
 
   // Get therapists for this spa
   const therapistsQuery = db.collection('therapists')

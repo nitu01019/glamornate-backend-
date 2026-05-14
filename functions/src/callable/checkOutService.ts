@@ -36,7 +36,18 @@ export const checkOutService = callableOpts({ maxInstances: 50 }).https.onCall(
       throw new functions.https.HttpsError('permission-denied', 'Only spa staff can check out a service');
     }
 
-    if (!['en_route', 'in_service'].includes(booking.bookingStatus)) {
+    // Phase 3.5 V-6 fix (Round 1, 2026-05-08): the gate was previously
+    // ['en_route', 'in_service'] but 'in_service' is a phantom string —
+    // it does not exist in the schema (`shared/contracts/booking.ts:211-218`)
+    // or the rules transition table (`firestore.rules:69-79`). The canonical
+    // mid-service state is 'in_progress', written by spa-staff via the direct
+    // Firestore update at `frontend/src/components/spa/booking/SpaBookingStatusActions.tsx:24-37`
+    // through the spa_owner/spa_staff allow-update rule at `firestore.rules:252-264`.
+    // Pre-fix: bookings reaching 'in_progress' could never be checked out by
+    // staff (failed-precondition every time), forcing cancelBooking with full
+    // refund for delivered service = revenue leakage. spec-logic-check-6 traced
+    // the customer-visible impact and promoted V-6 from spa-only to flow-blocking.
+    if (!['en_route', 'in_progress'].includes(booking.bookingStatus)) {
       throw new functions.https.HttpsError('failed-precondition', 'Booking is not in progress');
     }
 

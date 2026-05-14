@@ -5,7 +5,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import type { ZodSchema } from 'zod';
-import { errResponse } from '../../lib/contracts';
+import { errResponse } from '../../shared/contracts';
 
 export type ValidatedTarget = 'query' | 'body' | 'params';
 

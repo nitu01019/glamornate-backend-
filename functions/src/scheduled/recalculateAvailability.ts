@@ -96,14 +96,20 @@ export const recalculateAvailability = functions.pubsub
         const date = new Date(today);
         date.setDate(date.getDate() + dayOffset);
         const dateStr = date.toISOString().split('T')[0];
-        const dayOfWeek = date.toLocaleDateString('en-US', { weekday: 'short' }).toLowerCase();
+        // Day-of-week lookup — tolerate both short ("mon") and long
+        // ("monday") key formats so existing operatingHours docs keep
+        // working without a re-seed.
+        const dowShort = date.toLocaleDateString('en-US', { weekday: 'short' }).toLowerCase();
+        const dowLong = date.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+        const dayHours = spa.operatingHours?.[dowShort] ?? spa.operatingHours?.[dowLong];
 
         // Check if spa is open on this day
-        if (!spa.operatingHours?.[dayOfWeek]?.isOpen) {
+        if (!dayHours?.isOpen) {
           continue;
         }
 
-        const { open: openStr, close: closeStr } = spa.operatingHours[dayOfWeek];
+        const { open: openStr, close: closeStr } = dayHours;
+        const dayOfWeek = dowShort;
 
         // Read pre-grouped bookings for this date (no Firestore read here).
         const bookings = bookingsByDate.get(dateStr) ?? [];

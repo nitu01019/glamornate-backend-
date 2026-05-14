@@ -19,8 +19,10 @@
     "test:coverage": "vitest run --coverage",
     "seed:smoke": "ts-node --transpile-only ../scripts/seed-smoke-data.ts",
     "seed:catalog": "ts-node --transpile-only ../scripts/seed-services-from-catalog.ts",
+    "seed:glamornate-spa": "ts-node --transpile-only ../scripts/seed-glamornate-spa.ts",
     "verify:ttl": "ts-node --transpile-only scripts/verify-ttl-policies.ts",
-    "test:emulator": "bash scripts/run-emulator-tests.sh"
+    "test:emulator": "bash scripts/run-emulator-tests.sh",
+    "patch:spa-services-name": "ts-node --transpile-only ../scripts/patch-spa-services-name.ts"
   },
   "engines": {
     "node": "20"

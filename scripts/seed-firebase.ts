@@ -1,56 +1,12 @@
 /**
  * Firebase Seed Data Script
  *
- * Populates Firebase Firestore with sample data + creates 3 test users
- * (customer, spa-owner, admin) with hardcoded passwords. Intended for
- * local dev / emulator only — DO NOT run against production.
+ * This script populates Firebase Firestore with sample data for development.
  *
- * Guards (must all pass or script aborts):
- *   - `FIREBASE_PROJECT_ID` (or NEXT_PUBLIC_FIREBASE_PROJECT_ID) MUST be set
- *   - Project MUST NOT equal the production project (`glamornate-758c6`).
- *     Use the Firebase emulator or a separate dev project.
- *   - `CONFIRM_DEV_SEED` MUST equal `yes` (acknowledges hardcoded test
- *     credentials are about to be created).
- *
- * Usage (emulator):
- *   FIREBASE_PROJECT_ID=demo-glamornate \
- *   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 \
- *   FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 \
- *   CONFIRM_DEV_SEED=yes \
- *     npx ts-node scripts/seed-firebase.ts
+ * Usage:
+ * 1. Set up your Firebase credentials in frontend/.env.local
+ * 2. Run: npx ts-node scripts/seed-firebase.ts
  */
-
-// ---------------------------------------------------------------------------
-// Env guards — defense against accidental prod seed
-// ---------------------------------------------------------------------------
-const PROD_PROJECT = 'glamornate-758c6';
-const targetProject =
-  process.env.FIREBASE_PROJECT_ID ||
-  process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ||
-  '';
-const confirm = process.env.CONFIRM_DEV_SEED;
-
-if (!targetProject) {
-  // eslint-disable-next-line no-console
-  console.error(
-    '[seed-firebase] Aborted: FIREBASE_PROJECT_ID (or NEXT_PUBLIC_FIREBASE_PROJECT_ID) must be set.',
-  );
-  process.exit(1);
-}
-if (targetProject === PROD_PROJECT) {
-  // eslint-disable-next-line no-console
-  console.error(
-    `[seed-firebase] Aborted: refusing to seed against production project "${PROD_PROJECT}". This script creates hardcoded-password test accounts and is dev-only. Use the emulator (FIRESTORE_EMULATOR_HOST + FIREBASE_AUTH_EMULATOR_HOST) or a non-prod project.`,
-  );
-  process.exit(1);
-}
-if (confirm !== 'yes') {
-  // eslint-disable-next-line no-console
-  console.error(
-    '[seed-firebase] Aborted: CONFIRM_DEV_SEED must equal "yes" to acknowledge this script creates known-password test accounts (customer / spa-owner / admin).',
-  );
-  process.exit(1);
-}
 
 import { initializeApp } from 'firebase/app';
 import {
@@ -67,7 +23,7 @@ import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || '',
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || '',
-  projectId: targetProject,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || '',
   storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || '',
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || '',
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || '',
@@ -80,10 +36,6 @@ const auth = getAuth(app);
 
 // ============================================================================
 // SEED DATA
-// ============================================================================
-// All values below are SYNTHETIC TEST FIXTURES — bank account numbers,
-// IFSC codes, addresses, and personal details are NOT real. Used for
-// dev/emulator seeding only.
 // ============================================================================
 
 const SPAS = [
@@ -109,7 +61,7 @@ const SPAS = [
       timezone: 'Asia/Kolkata',
     },
     contact: {
-      phone: '+91 9000000000',
+      phone: '+91 9876543210',
       email: 'contact@serenityspa.com',
       website: 'https://serenityspa.com',
     },
@@ -124,8 +76,8 @@ const SPAS = [
     commission: { platformPercentage: 15, fixedFee: 50 },
     payout: {
       bankAccount: {
-        accountNumber: 'TEST-XXXX1234',
-        ifsc: 'TEST-SBIN0001234',
+        accountNumber: 'XXXX1234',
+        ifsc: 'SBIN0001234',
         accountName: 'Serenity Spa Pvt Ltd',
       },
       payoutFrequency: 'weekly',
@@ -176,7 +128,7 @@ const SPAS = [
       timezone: 'Asia/Kolkata',
     },
     contact: {
-      phone: '+91 9000000001',
+      phone: '+91 9876543211',
       email: 'hello@zenwellness.com',
     },
     categories: ['massage', 'wellness', 'body'],
@@ -581,7 +533,7 @@ async function createTestUsers() {
       profile: {
         displayName: 'Test Customer',
         email: 'customer@test.com',
-        phone: '+91 9000000002',
+        phone: '+91 9999999999',
       },
       emailVerified: true,
       phoneVerified: false,

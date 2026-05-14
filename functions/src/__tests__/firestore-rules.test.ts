@@ -65,7 +65,7 @@ async function seedUserDocuments(): Promise<void> {
 
     // Admin user
     await db.doc(`users/${ADMIN_UID}`).set({
-      email: 'admin@glamornate.test',
+      email: 'admin@glamornate.com',
       role: 'admin',
       isActive: true,
       profile: { name: 'Admin User' },

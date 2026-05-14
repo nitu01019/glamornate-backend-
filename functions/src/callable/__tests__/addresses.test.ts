@@ -561,6 +561,56 @@ describe('addAddress', () => {
       message: 'address/limit-reached',
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Sentinel guard rules (2026-05-14): `'0000000'` phone and `'000000'`
+  // pincode are reserved markers for the home-sheet GPS auto-save path.
+  // ONLY `label === 'detected'` addresses may carry them; non-detected
+  // labels must use real values. Patches may never set the sentinels.
+  // -------------------------------------------------------------------------
+  it('accepts the sentinel phone + pincode when label is `detected` (GPS auto-save path)', async () => {
+    seedUserDoc(UID);
+    const result = (await (addAddress as unknown as CallableFn)(
+      {
+        ...validAddress,
+        label: 'detected' as const,
+        phone: '0000000',
+        pincode: '000000',
+      },
+      makeCtx(),
+    )) as { addressId: string; isDefault: boolean };
+    expect(result.addressId).toBeDefined();
+    const list = listAddressDocs(UID);
+    expect(list[0].data.label).toBe('detected');
+    expect(list[0].data.phone).toBe('0000000');
+    expect(list[0].data.pincode).toBe('000000');
+  });
+
+  it('rejects sentinel phone for a non-detected label (cannot bypass real-phone validation)', async () => {
+    seedUserDoc(UID);
+    await expect(
+      (addAddress as unknown as CallableFn)(
+        { ...validAddress, label: 'home' as const, phone: '0000000' },
+        makeCtx(),
+      ),
+    ).rejects.toMatchObject({
+      code: 'invalid-argument',
+      message: 'address/invalid-input',
+    });
+  });
+
+  it('rejects sentinel pincode for a non-detected label', async () => {
+    seedUserDoc(UID);
+    await expect(
+      (addAddress as unknown as CallableFn)(
+        { ...validAddress, label: 'work' as const, pincode: '000000' },
+        makeCtx(),
+      ),
+    ).rejects.toMatchObject({
+      code: 'invalid-argument',
+      message: 'address/invalid-input',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -638,6 +688,79 @@ describe('updateAddress', () => {
     await expect(
       (updateAddress as unknown as CallableFn)(
         { addressId: created.addressId, patch: { isDefault: false } as never },
+        makeCtx(),
+      ),
+    ).rejects.toMatchObject({ code: 'invalid-argument' });
+  });
+
+  // -------------------------------------------------------------------------
+  // Sentinel + label-narrowing guards on updateAddress (2026-05-14)
+  // -------------------------------------------------------------------------
+  it('rejects patches that set label to `detected` (cannot convert a real address into a pruneable GPS entry)', async () => {
+    seedUserDoc(UID);
+    const created = (await (addAddress as unknown as CallableFn)(
+      validAddress,
+      makeCtx(),
+    )) as { addressId: string };
+
+    await expect(
+      (updateAddress as unknown as CallableFn)(
+        {
+          addressId: created.addressId,
+          patch: { label: 'detected' } as never,
+        },
+        makeCtx(),
+      ),
+    ).rejects.toMatchObject({ code: 'invalid-argument' });
+  });
+
+  it('allows patches that promote `detected` → `home` (re-categorise an auto-saved entry)', async () => {
+    seedUserDoc(UID);
+    const created = (await (addAddress as unknown as CallableFn)(
+      { ...validAddress, label: 'detected' as const, phone: '0000000', pincode: '000000' },
+      makeCtx(),
+    )) as { addressId: string };
+
+    const res = (await (updateAddress as unknown as CallableFn)(
+      {
+        addressId: created.addressId,
+        patch: { label: 'home' as const, phone: '+919876543210', pincode: '400001' },
+      },
+      makeCtx(),
+    )) as { addressId: string };
+
+    expect(res.addressId).toBe(created.addressId);
+    const list = listAddressDocs(UID);
+    expect(list[0].data.label).toBe('home');
+    expect(list[0].data.phone).toBe('+919876543210');
+    expect(list[0].data.pincode).toBe('400001');
+  });
+
+  it('rejects patches that set the sentinel phone `0000000` (no path can bypass real-phone validation)', async () => {
+    seedUserDoc(UID);
+    const created = (await (addAddress as unknown as CallableFn)(
+      validAddress,
+      makeCtx(),
+    )) as { addressId: string };
+
+    await expect(
+      (updateAddress as unknown as CallableFn)(
+        { addressId: created.addressId, patch: { phone: '0000000' } },
+        makeCtx(),
+      ),
+    ).rejects.toMatchObject({ code: 'invalid-argument' });
+  });
+
+  it('rejects patches that set the sentinel pincode `000000`', async () => {
+    seedUserDoc(UID);
+    const created = (await (addAddress as unknown as CallableFn)(
+      validAddress,
+      makeCtx(),
+    )) as { addressId: string };
+
+    await expect(
+      (updateAddress as unknown as CallableFn)(
+        { addressId: created.addressId, patch: { pincode: '000000' } },
         makeCtx(),
       ),
     ).rejects.toMatchObject({ code: 'invalid-argument' });

@@ -12,7 +12,7 @@ import {
   type SpasListQuery,
   okResponse,
   errResponse,
-} from '../../lib/contracts';
+} from '../../shared/contracts';
 import { validate, getValidated } from '../middleware/validate';
 
 export const spasRouter = Router();

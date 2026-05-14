@@ -11,7 +11,7 @@ import {
   okResponse,
   errResponse,
   type FallbackLevel,
-} from '../../lib/contracts';
+} from '../../shared/contracts';
 import { validate, getValidated } from '../middleware/validate';
 
 export const mostBookedRouter = Router();

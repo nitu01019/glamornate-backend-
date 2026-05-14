@@ -5,7 +5,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import { fetchTrendingSearches } from '../../data/trending-data-source';
-import { okResponse, type TrendingSearch } from '../../lib/contracts';
+import { okResponse, type TrendingSearch } from '../../shared/contracts';
 
 export const searchTrendingRouter = Router();
 

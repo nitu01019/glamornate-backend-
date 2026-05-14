@@ -427,6 +427,117 @@ describe('createBooking', () => {
     expect(result.pricing.discount).toBe(0)
   })
 
+  // Phase 4 Logic 4.1 — pricing math regression lock.
+  //
+  // The base pricing test above lands on round numbers (totalPrice 2000)
+  // where 18% and 20% are exact integers. The cases below exercise the
+  // Math.round half-boundary directly: JS Math.round is round-half-toward
+  // -+Infinity (NOT bankers'), so 22.5 → 23 and 49.5 → 50. INR is stored as
+  // integer paise — there is no float drift in the addon sum since we
+  // aggregate integers — but the tax/fee multiplications go through float
+  // and `Math.round` is the only thing keeping the persisted value an
+  // integer. If anyone swaps it for `Math.floor` / `Math.ceil` / `Math.trunc`
+  // these tests fail.
+  it('rounds tax half-up via Math.round (totalPrice=275 → tax=50, not 49)', async () => {
+    setupHappyPath()
+    // Override pricing fixtures: service=175, addon=100 → total=275.
+    // 275 * 0.18 = 49.5 exactly; Math.round → 50 (half-up, not bankers' 50
+    // either since 49.5 rounds toward +Inf regardless). 275 * 0.20 = 55.
+    mockGetAll.mockReset()
+    mockGetAll
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ priceOverride: 175 }) }])
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ basePrice: 175 }) }])
+      .mockResolvedValueOnce([{ exists: true, id: 'addon-1', data: () => ({ name: 'Aroma', price: 100 }) }])
+
+    const result = (await handler(validInput(), authedContext())) as any
+
+    expect(result.pricing.services).toBe(175)
+    expect(result.pricing.addons).toBe(100)
+    expect(result.pricing.tax).toBe(50)        // Math.round(49.5) = 50
+    expect(result.pricing.platformFee).toBe(55) // 275 * 0.20 = 55 exact
+    expect(result.pricing.total).toBe(380)     // 275 + 50 + 55
+  })
+
+  it('rounds non-half fractions correctly (totalPrice=333 → tax=60, fee=67)', async () => {
+    setupHappyPath()
+    // 333 * 0.18 = 59.94 → 60 ; 333 * 0.20 = 66.6 → 67.
+    // Locks `Math.round` (not floor/trunc which would give 59/66, not ceil
+    // which would give 60/67 only by coincidence here — pair with the 275
+    // case above to disambiguate floor/trunc/ceil from round-half-up).
+    mockGetAll.mockReset()
+    mockGetAll
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ priceOverride: 333 }) }])
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ basePrice: 333 }) }])
+
+    const data = { ...validInput() }
+    delete (data as any).addonIds
+
+    const result = (await handler(data, authedContext())) as any
+    expect(result.pricing.services).toBe(333)
+    expect(result.pricing.addons).toBe(0)
+    expect(result.pricing.tax).toBe(60)
+    expect(result.pricing.platformFee).toBe(67)
+    expect(result.pricing.total).toBe(460)
+  })
+
+  it('aggregates multiple addons into addonsTotal correctly', async () => {
+    setupHappyPath()
+    // Multi-addon path: addonsTotal must sum every line, not just the first.
+    // Existing tests only cover 1-addon; this guards the for-loop in
+    // createBooking.ts:307-315.
+    mockGetAll.mockReset()
+    mockGetAll
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ priceOverride: 500 }) }])
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ basePrice: 500 }) }])
+      .mockResolvedValueOnce([
+        { exists: true, id: 'addon-1', data: () => ({ name: 'Aroma', price: 200 }) },
+        { exists: true, id: 'addon-2', data: () => ({ name: 'Hot Stones', price: 300 }) },
+      ])
+
+    const data = { ...validInput(), addonIds: ['addon-1', 'addon-2'] }
+    const result = (await handler(data, authedContext())) as any
+
+    expect(result.pricing.services).toBe(500)
+    expect(result.pricing.addons).toBe(500) // 200 + 300
+    expect(result.pricing.tax).toBe(180)    // 1000 * 0.18 exact
+    expect(result.pricing.platformFee).toBe(200) // 1000 * 0.20 exact
+    expect(result.pricing.total).toBe(1380)
+  })
+
+  it('treats non-existent or missing addon docs as zero (no NaN propagation)', async () => {
+    setupHappyPath()
+    // If an addon doc is missing, the loop skips it (createBooking.ts:308)
+    // — no NaN should reach addonsTotal, and totalPrice stays an integer.
+    mockGetAll.mockReset()
+    mockGetAll
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ priceOverride: 1000 }) }])
+      .mockResolvedValueOnce([{ exists: true, data: () => ({ basePrice: 1000 }) }])
+      .mockResolvedValueOnce([
+        { exists: false, id: 'addon-missing', data: () => null },
+      ])
+
+    const result = (await handler(validInput(), authedContext())) as any
+    expect(result.pricing.addons).toBe(0)
+    expect(result.pricing.services).toBe(1000)
+    expect(Number.isFinite(result.pricing.tax)).toBe(true)
+    expect(Number.isFinite(result.pricing.platformFee)).toBe(true)
+    expect(result.pricing.total).toBe(1380) // 1000 + 180 + 200
+  })
+
+  it('writes discount=0 at booking create time (voucher applied separately)', async () => {
+    // applyVoucher is a separate callable; createBooking always writes
+    // pricing.discount = 0. If a future change tries to inline voucher
+    // application here it must update the pricing recompute path too —
+    // and this assertion fails until it does.
+    setupHappyPath()
+    const result = (await handler(validInput(), authedContext())) as any
+    expect(result.pricing.discount).toBe(0)
+
+    const setCall = mockSet.mock.calls[0]
+    const bookingData = setCall[1]
+    expect(bookingData.pricing.discount).toBe(0)
+  })
+
   it('should use global basePrice when spa priceOverride is not set', async () => {
     setupHappyPath()
 
@@ -645,5 +756,28 @@ describe('createBooking', () => {
       },
     }
     await expect(handler(data, authedContext())).rejects.toThrow()
+  })
+
+  // -----------------------------------------------------------------------
+  // SC-9 / V-3 — scheduledAt field for autoTransitionToEnRoute
+  // -----------------------------------------------------------------------
+
+  it('writes scheduledAt as IST wall-clock converted to UTC Timestamp (SC-9, V-3)', async () => {
+    // Without `scheduledAt`, autoProcessBookings.autoTransitionToEnRoute
+    // (queries `where('scheduledAt','<=', ...)`) never fires for new
+    // bookings — only rescheduled ones (rescheduleBooking.ts:160 already
+    // sets it). This test locks the field-write half of SC-9.
+    setupHappyPath()
+    await handler(validInput(), authedContext())
+
+    const setCall = mockSet.mock.calls[0]
+    const bookingData = setCall[1]
+
+    expect(bookingData.scheduledAt).toBeDefined()
+
+    // istDateAtTimeToUtc('2027-06-15', '10:00') → IST 10:00 = UTC 04:30.
+    // 2027-06-15T04:30:00.000Z = 1813559400000 ms.
+    const expectedMs = Date.UTC(2027, 5, 15, 4, 30, 0)
+    expect(bookingData.scheduledAt.toDate().getTime()).toBe(expectedMs)
   })
 })

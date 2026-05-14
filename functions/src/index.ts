@@ -53,18 +53,18 @@ export { getAvailableDates } from './callable/getAvailableDates';
 export { markAllNotificationsRead } from './callable/markAllNotificationsRead';
 export { markReviewHelpful } from './callable/markReviewHelpful';
 export { reportReview } from './callable/reportReview';
-export { deleteAccount } from './callable/deleteAccount';
-export { revokeMySessions } from './callable/revokeMySessions';
+export { deleteAccount } from './auth/delete-account';
+export { revokeMySessions } from './auth/revoke-sessions';
 // Phase 4 (Booking Flow Fix v3.1, 2026-05-02): admin-only merge of two
 // user uids when the customer pre-created data under both before linking.
-export { mergeUserAccounts } from './callable/mergeUserAccounts';
+export { mergeUserAccounts } from './auth/merge-accounts';
 // Phase 9B (Booking Flow Fix v3.1, 2026-05-02): customer-facing voucher
 // application. Replaces the prior client-side voucherCode write that
 // allowed privilege escalation.
 export { applyVoucher } from './callable/applyVoucher';
 
 // ========== Phase 7 — Signup availability check ==========
-export { checkSignupAvailability } from './callable/checkSignupAvailability';
+export { checkSignupAvailability } from './auth/check-signup';
 
 // ========== Phase 4 / 4A — Address Subcollection Callables ==========
 export { addAddress } from './callable/addAddress';
@@ -78,14 +78,6 @@ export { reverseGeocode } from './callable/reverseGeocode';
 
 // ========== Phase 4 / 4C — Notifications Broadcast Callables ==========
 export { dispatchBroadcast } from './callable/dispatchBroadcast';
-
-// ========== Admin Tooling ==========
-// Admin-only callable that idempotently mirrors the Firestore
-// `users/{uid}.role === 'admin'` state into a Firebase Auth custom claim
-// (`{ admin: true }`). Groundwork for migrating storage.rules /
-// firestore.rules from Firestore-doc role lookups to verified custom
-// claims (defense-in-depth). See `docs/runbooks/admin-claims-migration.md`.
-export { setAdminClaim } from './callable/setAdminClaim';
 
 // ========== Event-Triggered Functions ==========
 export { onBookingCreated } from './events/onBookingCreated';

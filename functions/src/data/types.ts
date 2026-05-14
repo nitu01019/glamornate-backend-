@@ -9,4 +9,4 @@ export type {
   HomeService,
   DiscountType,
   Promotion,
-} from '../lib/data-catalog';
+} from '../shared/catalog';

@@ -242,7 +242,10 @@ export async function callGoogleGeocode(
     case 'OK':
       break;
     case 'ZERO_RESULTS':
-      throw new functions.https.HttpsError('not-found', 'geocode/no-results');
+      throw new functions.https.HttpsError(
+        'not-found',
+        'Could not find your location. Please try a more specific address.',
+      );
     case 'OVER_QUERY_LIMIT':
     case 'OVER_DAILY_LIMIT':
       throw new functions.https.HttpsError('resource-exhausted', 'geocode/quota');
@@ -264,7 +267,10 @@ export async function callGoogleGeocode(
 
   const first = body.results?.[0];
   if (!first || !first.formatted_address) {
-    throw new functions.https.HttpsError('not-found', 'geocode/no-results');
+    throw new functions.https.HttpsError(
+        'not-found',
+        'Could not find your location. Please try a more specific address.',
+      );
   }
 
   const result: GeocodeResult = {
@@ -340,11 +346,17 @@ export async function reverseGeocodeHandler(
   }
 
   // ---- 2. Secret check ---------------------------------------------------
+  // Reject empty AND the bootstrap placeholder string up-front. Sending the
+  // placeholder to Google returns REQUEST_DENIED, which is indistinguishable
+  // from a real bad-key event at the client — so we short-circuit here so
+  // the UI shows the right "set up your key" copy.
   const apiKey = deps.getSecret();
-  if (!apiKey || apiKey.trim().length === 0) {
+  const isPlaceholder = typeof apiKey === 'string' && apiKey.startsWith('PLACEHOLDER_');
+  if (!apiKey || apiKey.trim().length === 0 || isPlaceholder) {
     logger.warn('geocode/not-configured — GOOGLE_MAPS_GEOCODING_KEY not set', {
       uid,
       cellId,
+      placeholder: isPlaceholder,
     });
     throw new functions.https.HttpsError(
       'failed-precondition',

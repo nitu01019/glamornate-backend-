@@ -183,6 +183,9 @@ interface HappyPathOpts {
   // to share a single in-memory `slots` array so the harness observes the
   // collapsed-update behaviour.
   sharedSlots?: Array<Record<string, unknown>>
+  // 2026-05-14: overrides what the in-transaction re-read of the booking doc
+  // returns. Used by the RESCHEDULE_CONFLICT precondition test.
+  txnBookingDoc?: { exists: boolean; data: () => unknown }
 }
 
 function setupHappyPath(opts: HappyPathOpts = {}) {
@@ -245,6 +248,12 @@ function setupHappyPath(opts: HappyPathOpts = {}) {
     const txn = {
       get: vi.fn().mockImplementation((ref: any) => {
         const path: string = ref?.path ?? ''
+        // 2026-05-14 (RESCHEDULE_CONFLICT precondition): the handler now
+        // re-reads the booking doc as its first transactional read so it can
+        // detect concurrent edits between the outer .get() and the txn start.
+        if (path === 'bookings/booking-1') {
+          return Promise.resolve(opts.txnBookingDoc ?? bookingDoc)
+        }
         if (path === newAvailPath) return Promise.resolve(newAvailDoc)
         if (path === oldAvailPath) return Promise.resolve(oldAvailDoc)
         // Fallback: legacy ordering when paths are not present.
@@ -381,12 +390,24 @@ describe('rescheduleBooking', () => {
       )
     })
 
-    it('throws not-found when new availability document does not exist', async () => {
+    it('warns and proceeds with booking update when new availability doc is missing', async () => {
+      // 2026-05-14: behaviour changed — missing availability doc now mirrors
+      // createBooking.ts:69-72 (warn-and-proceed) instead of throwing
+      // 'Availability data not found'. The booking doc is the source of
+      // truth; availability is a cache that the scheduled recalculate job
+      // backfills. Throwing here was the prod-visible "resource not found"
+      // bug — see [[booking_flow_overhaul_2026_05_13]] follow-up.
       setupHappyPath({ newAvailExists: false })
 
-      await expect(handler(validInput(), authedContext())).rejects.toThrow(
-        'Availability data not found'
+      const result = (await handler(validInput(), authedContext())) as any
+      expect(result.success).toBe(true)
+      expect(result.newSlot.start).toBe('14:00')
+      // Exactly one update — the booking doc write. No availability writes
+      // because the availability doc didn't exist.
+      const availUpdates = mockTxnUpdate.mock.calls.filter(
+        (c: unknown[]) => (c[1] as Record<string, unknown>).slots !== undefined,
       )
+      expect(availUpdates).toHaveLength(0)
     })
 
     it('throws aborted when requested slot is not available (already taken)', async () => {
@@ -406,6 +427,93 @@ describe('rescheduleBooking', () => {
 
       await expect(handler(validInput(), authedContext())).rejects.toThrow()
       expect(mockTxnUpdate).not.toHaveBeenCalled()
+    })
+
+    // 2026-05-14: the production "resource not found" bug surfaced when
+    // booking.therapistId was null (no therapist selected at create time).
+    // The availability composite-key `${spaId}_${date}_null` never exists,
+    // so the old code threw 'not-found' from the txn body. The fix skips
+    // availability hold/release entirely when therapistId is null —
+    // mirroring createBooking.ts:52-74's optional-therapist guard.
+    it('reschedules successfully when booking has null therapistId', async () => {
+      setupHappyPath({ bookingOverrides: { therapistId: null } })
+
+      const result = (await handler(validInput(), authedContext())) as any
+      expect(result.success).toBe(true)
+      expect(result.newSlot.start).toBe('14:00')
+
+      // No availability writes — the entire if (therapistId) block was
+      // skipped. Exactly one update happened: the booking doc itself.
+      const availUpdates = mockTxnUpdate.mock.calls.filter(
+        (c: unknown[]) => (c[1] as Record<string, unknown>).slots !== undefined,
+      )
+      expect(availUpdates).toHaveLength(0)
+    })
+
+    // 2026-05-14: RESCHEDULE_CONFLICT precondition — when the booking doc's
+    // updatedAt timestamp differs between the outer .get() and the
+    // transaction's re-read, another session has rescheduled in the gap.
+    // We must abort instead of silently overwriting.
+    it('rejects with RESCHEDULE_CONFLICT when booking updatedAt changes mid-transaction', async () => {
+      const tsA = {
+        seconds: 1700000000,
+        toDate: () => new Date(1700000000000),
+        isEqual: (other: any) =>
+          !!other && typeof other.seconds === 'number' && other.seconds === 1700000000,
+      }
+      const tsB = {
+        seconds: 1700000099,
+        toDate: () => new Date(1700000099000),
+        isEqual: (other: any) =>
+          !!other && typeof other.seconds === 'number' && other.seconds === 1700000099,
+      }
+      const outerBookingDoc = {
+        exists: true,
+        ref: { id: 'booking-1' },
+        data: () => defaultBooking({ updatedAt: tsA }),
+      }
+      const txnBookingDoc = {
+        exists: true,
+        data: () => defaultBooking({ updatedAt: tsB }),
+      }
+      // Override mockDocFn so the outer .get() sees tsA on the booking doc.
+      mockDocFn.mockImplementation((docId: string, collectionName?: string) => {
+        const path = collectionName ? `${collectionName}/${docId}` : docId
+        if (docId === 'booking-1') {
+          return { path, get: () => Promise.resolve(outerBookingDoc) }
+        }
+        if (docId === 'user-123') {
+          return {
+            path,
+            get: () =>
+              Promise.resolve({
+                exists: true,
+                data: () => ({ role: 'customer', spaData: undefined }),
+              }),
+          }
+        }
+        return {
+          path,
+          get: () => Promise.resolve({ exists: false, data: () => null }),
+        }
+      })
+      // runTransaction returns the txn-time doc with tsB on the booking
+      // re-read, triggering the precondition mismatch.
+      mockRunTransaction.mockImplementation(async (cb: Function) => {
+        const txn = {
+          get: vi.fn().mockImplementation((ref: any) => {
+            const path: string = ref?.path ?? ''
+            if (path === 'bookings/booking-1') return Promise.resolve(txnBookingDoc)
+            return Promise.resolve({ exists: true, data: () => ({ slots: [] }) })
+          }),
+          update: mockTxnUpdate,
+        }
+        return cb(txn)
+      })
+
+      await expect(handler(validInput(), authedContext())).rejects.toThrow(
+        /RESCHEDULE_CONFLICT|modified by another session/,
+      )
     })
   })
 

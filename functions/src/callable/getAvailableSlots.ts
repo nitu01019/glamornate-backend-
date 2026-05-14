@@ -64,11 +64,16 @@ export const getAvailableSlots = callableOpts({ maxInstances: 50 }).https.onCall
       }
     }
 
-    // If no cached data or force refresh, calculate on the fly
-    if (slots.length === 0 || forceRefresh) {
-      if (forceRefresh) {
-        await calculateAvailabilityForDate(date, spaId);
-      }
+    // If no cached data or force refresh, calculate on the fly. The legacy
+    // implementation only invoked `calculateAvailabilityForDate` when
+    // `forceRefresh` was true, so a freshly-seeded spa with no cached
+    // availability doc surfaced as a permanent "no slots" empty state until
+    // the scheduled job ran. Trigger the compute path whenever the cache is
+    // empty as well — the slot doc has a 5-minute TTL so subsequent requests
+    // hit the cache.
+    const shouldRecompute = slots.length === 0 || forceRefresh;
+    if (shouldRecompute) {
+      await calculateAvailabilityForDate(date, spaId);
 
       const availability = await getAvailability(spaId, date, therapistId);
 

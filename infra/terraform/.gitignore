@@ -1,0 +1,19 @@
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Local overrides — committing these can leak project ids / secrets
+*.tfvars
+!terraform.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI + editor junk
+.terraformrc
+terraform.rc

@@ -143,7 +143,20 @@ service cloud.firestore {
 
     // Spas Collection
     match /spas/{spaId} {
-      allow read: if isCurrentUserActive();
+      // A8-C2 (2026-05-12): pending spa registrations carry PII (phone, email,
+      // PAN/GST docs) — they MUST NOT be visible to arbitrary readers. Active
+      // / approved spa docs are catalog content (name, address, services,
+      // rating, photos) and should be publicly readable so the customer can
+      // browse before signing up.
+      //
+      // 2026-05-13 (rev 2): non-pending reads are now public (auth not
+      // required). The earlier `isAuthenticated()` gate silently filtered out
+      // every result when a query ran before Firebase Auth restored its token
+      // on cold start — the booking wizard saw `useActiveSpa() === null` and
+      // refused to submit. Catalog reads do not leak PII, so public is fine.
+      allow read: if resource.data.status != 'pending' ||
+        (isAuthenticated() && resource.data.ownerId == request.auth.uid) ||
+        (isAuthenticated() && isAdmin());
       allow create: if isAuthenticated() && isSpaOwner()
         && request.resource.data.ownerId == request.auth.uid;
       allow update: if isSpaOwnerOf(spaId) || isAdmin();
@@ -227,9 +240,17 @@ service cloud.firestore {
       //     catalog. Allowing it client-side previously let a malicious
       //     client mark a booking as voucher-redeemed without the server
       //     having validated the code or recomputed totals.
+      // A8-H2 (2026-05-12): require a non-empty serviceIds list on create.
+      // Without this, a malicious client could persist a booking with an
+      // empty/absent serviceIds and bypass server-side pricing validation
+      // in the createBookingDraft callable (which only runs on the happy
+      // path). The Admin SDK booking writer always supplies a non-empty
+      // list, so this rule does not affect legitimate traffic.
       allow create: if isAuthenticated() &&
         request.resource.data.userId == request.auth.uid &&
         request.resource.data.bookingStatus == 'confirmed' &&
+        request.resource.data.serviceIds is list &&
+        request.resource.data.serviceIds.size() > 0 &&
         request.resource.data.keys().hasOnly([
           'userId', 'spaId', 'therapistId', 'serviceIds',
           'slot', 'bookingStatus', 'notes', 'specialRequests',
@@ -254,8 +275,13 @@ service cloud.firestore {
         (resource.data.userId == request.auth.uid &&
           request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['notes', 'specialRequests', 'updatedAt'])) ||
-        // Spa owner/staff: can update operational fields with valid status transitions
+        // Spa owner/staff: can update operational fields with valid status transitions.
+        // A8-C1 (2026-05-12): pin spaId immutability — prevents a compromised
+        // spa-owner client from re-targeting an existing booking onto another
+        // spa via a direct Firestore write (which would otherwise pivot the
+        // booking out of the original spa's view and into the attacker's).
         ((isSpaOwnerOf(resource.data.spaId) || isSpaStaffOf(resource.data.spaId)) &&
+          resource.data.spaId == request.resource.data.spaId &&
           request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['bookingStatus', 'statusHistory', 'updatedAt', 'cancellation']) &&
           isValidStatusTransition(resource.data.bookingStatus, request.resource.data.bookingStatus)) ||
@@ -540,7 +566,16 @@ service cloud.firestore {
     // emit a notification to the partnerships team. Tracked separately.
     match /partner_registrations/{registrationId} {
       allow read, update, delete: if isAdmin();
-      allow create: if request.resource.data.keys().hasAll(
+      // A8-H4 (2026-05-12): require authentication on create. The form was
+      // previously unauthenticated to support the marketing landing page,
+      // but unauthenticated writes are a spam/abuse vector with no rate-
+      // limit. The TODO at L538 (callable migration with CAPTCHA + App
+      // Check) supersedes this gate — until then, requiring auth raises
+      // the cost of automated submissions to ~zero with no UX harm
+      // (visitors hit the same Firebase Auth anonymous-or-account path
+      // already used for booking).
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasAll(
             ['spaName', 'ownerName', 'phone', 'email', 'city',
              'staffCount', 'services', 'status', 'createdAt'])
         && request.resource.data.keys().hasOnly(

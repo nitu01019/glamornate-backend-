@@ -91,7 +91,7 @@ async function cancelExpiredDrafts(now: admin.firestore.Timestamp): Promise<numb
 // payment_pending is no longer a valid booking state; pay-at-spa flow writes
 // 'confirmed' directly so there is no payment-window to expire.
 
-async function autoTransitionToEnRoute(now: Date): Promise<number> {
+export async function autoTransitionToEnRoute(now: Date): Promise<number> {
   const lookaheadTimestamp = admin.firestore.Timestamp.fromMillis(now.getTime() + (5 * 60 * 1000));
   const fiveMinAgo = admin.firestore.Timestamp.fromMillis(now.getTime() - (5 * 60 * 1000));
 
@@ -107,9 +107,21 @@ async function autoTransitionToEnRoute(now: Date): Promise<number> {
   for (const doc of snapshot.docs) {
     const booking = doc.data();
 
-    // Only transition if not already checked in
-    if (!booking.checkIn) {
-      await doc.ref.update({
+    // Skip if already checked in (guard reads the snapshot row, fine to keep
+    // outside the txn — checkIn is monotonic).
+    if (booking.checkIn) continue;
+
+    // Race precondition (Phase 4 / Task 4.4 — design doc spec-logic-check-3):
+    // a customer cancellation can land between the snapshot read and this
+    // per-doc update. Wrap the write in a transaction with an in-txn re-read
+    // so we only flip to `en_route` if the booking is still `confirmed`.
+    const didTransition = await db.runTransaction(async (t) => {
+      const fresh = await t.get(doc.ref);
+      if (!fresh.exists) return false;
+      const freshData = fresh.data();
+      if (freshData?.bookingStatus !== 'confirmed') return false;
+
+      t.update(doc.ref, {
         bookingStatus: 'en_route',
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         'statusHistory': admin.firestore.FieldValue.arrayUnion({
@@ -122,8 +134,12 @@ async function autoTransitionToEnRoute(now: Date): Promise<number> {
           reason: 'Appointment time approaching',
         }),
       });
+      return true;
+    });
 
-      // Send notification
+    if (didTransition) {
+      // Send notification (outside the txn — Firestore txns can't perform
+      // server-allocated `.add()` writes, and this is fire-and-forget).
       await db.collection('notifications').add({
         userId: booking.userId,
         type: 'en_route',

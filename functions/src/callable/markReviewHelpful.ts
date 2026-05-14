@@ -3,7 +3,7 @@ import * as admin from 'firebase-admin';
 import { callableOpts } from '../utils/callable-opts';
 import { withRateLimit } from '../utils/withRateLimit';
 import { handleError } from '../utils/error-handler';
-import { MarkReviewHelpfulInputSchema as MarkReviewHelpfulSchema } from '../lib/contracts';
+import { MarkReviewHelpfulInputSchema as MarkReviewHelpfulSchema } from '../shared/contracts';
 
 const db = admin.firestore();
 

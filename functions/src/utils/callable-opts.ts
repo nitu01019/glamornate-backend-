@@ -19,12 +19,18 @@ export type CallableOptsOverrides = RuntimeOptions & {
  *  - enforceAppCheck: true (reject requests without a valid App Check token)
  *  - consumeAppCheckToken: false (monitoring mode — do not burn the single-use token)
  *
+ * Env override: `APP_CHECK_ENFORCED=false` flips `enforceAppCheck` to `false` at
+ * deploy time. Used to match a project-level UNENFORCED state (e.g., during
+ * sideloaded-APK testing before the build is on Play Console and Play Integrity
+ * recognizes it). Per-callable overrides via `overrides` still win.
+ *
  * Override per-callable via `overrides` (e.g., region, memory, timeoutSeconds, minInstances).
  */
 export function callableOpts(overrides: CallableOptsOverrides = {}) {
   const { region, ...runtimeOverrides } = overrides;
+  const enforceAppCheck = process.env.APP_CHECK_ENFORCED === 'false' ? false : true;
   const opts: RuntimeOptions = {
-    enforceAppCheck: true,
+    enforceAppCheck,
     consumeAppCheckToken: false,
     ...runtimeOverrides,
   };

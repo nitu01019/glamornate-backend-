@@ -3,7 +3,7 @@ import * as admin from 'firebase-admin';
 import {
   CreateBookingDraftInputSchema,
   type CreateBookingDraftInput,
-} from '../lib/contracts';
+} from '../shared/contracts';
 import { callableOpts } from '../utils/callable-opts';
 import { withRateLimit } from '../utils/withRateLimit';
 import { handleError } from '../utils/error-handler';
@@ -342,6 +342,10 @@ export const createBooking = callableOpts({ maxInstances: 100 }).https.onCall(
       services,
       addons,
       slot: { date, start, end, duration: validated.slot.duration },
+      // SC-9 / V-3: mirror rescheduleBooking.ts pattern. Without scheduledAt,
+      // autoProcessBookings.autoTransitionToEnRoute (queries
+      // where('scheduledAt','<=', ...)) never fires for newly-created bookings.
+      scheduledAt: admin.firestore.Timestamp.fromDate(istDateAtTimeToUtc(date, start)),
       pricing: {
         services: servicesTotal,
         addons: addonsTotal,

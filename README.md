@@ -22,7 +22,8 @@ tooling.
 | `docs/` | Operational docs. |
 | `.deploy-staging/` | **Gitignored.** Scratch directory created by `deploy-functions.sh`; do not edit by hand. |
 
-Hosting `public` points at `../frontend/out` (relative to a private monorepo layout where `frontend/` is a sibling directory). In this **public mirror**, that path does not resolve — `firebase deploy --only hosting` is intended to be run from the private monorepo, not this standalone clone. The companion frontend repo lives at https://github.com/nitu01019/glamornate-frontend.
+Hosting `public` points at `../frontend/out` — the static export from the
+Next.js app. See `firebase.json` for full hosting headers and rewrites.
 
 ## Local development
 
@@ -159,14 +160,3 @@ Start with `firebase emulators:start` from this directory, or use the
 - `functions/README.md` — function authoring, `src/` subtree, scripts, testing conventions, hardening notes
 - `DEPLOY-READY.md` — pre-flight deploy checklist
 - `docs/` — operational runbooks
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
-
-© 2026 Glamornate / nitu01019. See [LICENSE](LICENSE) for full terms.
-
-## Contributing & Security
-
-- Issues: see [CONTRIBUTING.md](CONTRIBUTING.md)
-- Security disclosures: see [SECURITY.md](SECURITY.md) — do not open public issues for security

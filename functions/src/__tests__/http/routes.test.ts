@@ -20,7 +20,7 @@ import {
   SearchResponseSchema,
   TrendingResponseSchema,
   SuggestionResponseSchema,
-} from '../../lib/contracts';
+} from '../../shared/contracts';
 import { buildApp } from '../../http/app';
 import { resetRateLimitBuckets } from '../../http/middleware/rateLimit';
 
@@ -146,11 +146,15 @@ describe('HTTP API — contract tests', () => {
     expect(res.body.data).toEqual([]);
   });
 
-  it('POST /bookings without auth returns 401', async () => {
+  it('POST /bookings returns 404 (V-1 — stub removed; creation is callable-only)', async () => {
+    // The legacy POST /bookings HTTP handler returned synthetic booking IDs
+    // without persisting to Firestore (V-1, SC-5 BE). It was deleted in favor
+    // of the canonical `createBookingDraft` callable. Any future client that
+    // tries the old wire shape must fail loudly (404), not silently succeed.
     const res = await request(app)
       .post(`${BASE}/bookings`)
       .send({ services: [{ serviceId: 'x', quantity: 1 }], date: '2026-05-01', timeSlot: '10:00', location: 'spa' });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(404);
     expect(res.body.success).toBe(false);
   });
 

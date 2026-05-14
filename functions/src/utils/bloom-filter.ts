@@ -26,12 +26,15 @@
  *     authoritative query is reserved for the "maybe present" cases.
  *
  * Security note (H4):
- *   The persisted bloom doc at `_meta/signupBloom` is auth-gated for
- *   reads — `request.auth != null` per `firestore.rules`. The signup
- *   form must always go through `checkSignupAvailability` (which uses
- *   the Admin SDK and bypasses rules); the frontend MUST NEVER read
- *   the bloom doc directly. Public read would convert the doc into a
- *   bulk-probable enumeration oracle even though it is probabilistic.
+ *   The persisted bloom doc at `_meta/signupBloom` is admin-only —
+ *   `allow read: if false; allow write: if false;` per `firestore.rules`.
+ *   Even authenticated reads are denied because the raw bit buffer is a
+ *   bulk-probable enumeration oracle (an attacker could fetch it once
+ *   and compute membership offline against millions of candidate
+ *   emails — ~1% FPR is not enough to make that safe). The signup form
+ *   must always go through the `checkSignupAvailability` callable,
+ *   which uses the Admin SDK and bypasses rules; the frontend MUST
+ *   NEVER read the bloom doc directly.
  */
 
 import { createHash } from 'crypto';

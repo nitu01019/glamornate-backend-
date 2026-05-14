@@ -7,7 +7,7 @@
 import { catalogServices } from './glamornate-catalog';
 import type { HomeService } from './types';
 import { computeRelevanceScore, fuzzyMatch, levenshteinDistance } from './search-scoring';
-import type { SpaCategory, SearchSortBy } from '../lib/contracts';
+import type { SpaCategory, SearchSortBy } from '../shared/contracts';
 
 // Map catalog categorySlug -> SpaCategory union used by the public API filter bar.
 const SLUG_TO_CATEGORY: Record<string, SpaCategory> = {

@@ -10,7 +10,7 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
-import { errResponse } from '../../lib/contracts';
+import { errResponse } from '../../shared/contracts';
 
 export interface RateLimitOptions {
   windowMs: number;
@@ -37,18 +37,20 @@ export function resetRateLimitBuckets(): void {
 }
 
 function defaultKey(req: Request): string {
-  return (
-    (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
-    req.ip ||
-    'unknown'
-  );
+  // Express's `app.set('trust proxy', 1)` already parses x-forwarded-for and
+  // populates `req.ip` with the real client address. Reading the header
+  // manually would bypass that trust setting and accept spoofed IPs from any
+  // request — so always rely on `req.ip` here.
+  return req.ip || 'unknown';
 }
 
 export function rateLimit(options: RateLimitOptions) {
   const { windowMs, max, keyGenerator = defaultKey } = options;
 
   return (req: Request, res: Response, next: NextFunction): void => {
-    const key = `${req.method}:${req.baseUrl}${req.path}:${keyGenerator(req)}`;
+    // Per-IP bucket only: per-route bucketing let an attacker fan out across
+    // N routes for `routes × max`/min. The window is shared across all routes.
+    const key = keyGenerator(req);
     const now = Date.now();
     const bucket = buckets.get(key);
 
@@ -61,7 +63,10 @@ export function rateLimit(options: RateLimitOptions) {
     if (bucket.count >= max) {
       const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
       res.setHeader('Retry-After', String(retryAfter));
-      res.status(429).json(errResponse('Too many requests. Please try again shortly.'));
+      res.status(429).json({
+        ...errResponse('Too many requests. Please try again shortly.'),
+        code: 'rate-limited',
+      });
       return;
     }
 

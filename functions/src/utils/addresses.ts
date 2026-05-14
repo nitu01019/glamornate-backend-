@@ -59,7 +59,20 @@ const PincodeSchema = z
   .trim()
   .regex(/^\d{4,10}$/, 'Invalid pincode');
 
-export const AddressLabelSchema = z.enum(['home', 'work', 'other']);
+// `'detected'` is reserved for the home-sheet GPS auto-save path. The
+// frontend `AddressLabel` union and `MANUAL_ADDRESS_LABELS` constant
+// MUST stay in lock-step with this enum.
+export const AddressLabelSchema = z.enum(['home', 'work', 'other', 'detected']);
+
+/**
+ * Sentinel values used by the GPS auto-save flow when reverse-geocode
+ * didn't return a pincode and/or the auth user has no `phoneNumber` on
+ * file. Allowed ONLY for `label === 'detected'`; any other label must
+ * carry real values. Defined here (backend) so the validators below can
+ * enforce the invariant; the frontend mirrors the same constants.
+ */
+export const DETECTED_PHONE_SENTINEL = '0000000';
+export const DETECTED_PINCODE_SENTINEL = '000000';
 
 export const GeoSchema = z
   .object({
@@ -69,13 +82,10 @@ export const GeoSchema = z
   })
   .optional();
 
-/**
- * Full address shape. Matches the frontend `SavedAddress` type in
- * `frontend/src/types/index.ts` (minus server-managed fields).
- *
- * The consumer contract for Alpha's Phase 2 is defined in `addAddress.ts`.
- */
-export const AddressInputSchema = z.object({
+// Internal raw shape (pre-refinement). Kept separate so `.partial()` on the
+// patch schema doesn't fight the .superRefine that depends on `label` being
+// present. The refinement-bound schemas are exported below.
+const RawAddressInputShape = {
   label: AddressLabelSchema,
   name: z.string().trim().min(1).max(80),
   phone: PhoneSchema,
@@ -87,14 +97,88 @@ export const AddressInputSchema = z.object({
   pincode: PincodeSchema,
   isDefault: z.boolean().optional(),
   geo: GeoSchema,
-});
+} as const;
+
+/**
+ * Sentinel guards — enforce the invariant that `'0000000'` / `'000000'`
+ * are reserved markers that ONLY a `label === 'detected'` entry may carry.
+ * A malicious client cannot use them to bypass real-phone / real-pincode
+ * validation on `home` / `work` / `other`.
+ */
+function refineSentinels(
+  data: { label?: 'home' | 'work' | 'other' | 'detected'; phone?: string; pincode?: string },
+  ctx: z.RefinementCtx,
+): void {
+  const isDetected = data.label === 'detected';
+  if (!isDetected) {
+    if (data.phone === DETECTED_PHONE_SENTINEL) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['phone'],
+        message: 'Reserved sentinel phone — only the GPS auto-save flow may use it',
+      });
+    }
+    if (data.pincode === DETECTED_PINCODE_SENTINEL) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['pincode'],
+        message: 'Reserved sentinel pincode — only the GPS auto-save flow may use it',
+      });
+    }
+  }
+}
+
+/**
+ * Full address shape. Matches the frontend `SavedAddress` type in
+ * `frontend/src/types/index.ts` (minus server-managed fields).
+ *
+ * The consumer contract for Alpha's Phase 2 is defined in `addAddress.ts`.
+ */
+export const AddressInputSchema = z.object(RawAddressInputShape).superRefine(refineSentinels);
 
 export type AddressInput = z.infer<typeof AddressInputSchema>;
 
-/** Patch schema — every field optional, isDefault explicitly omitted. */
-export const AddressPatchSchema = AddressInputSchema.omit({
-  isDefault: true,
-}).partial();
+/**
+ * Patch schema — every field optional, `isDefault` omitted (callers use
+ * `setDefaultAddress` for that).
+ *
+ * `label` is restricted to the manual set `'home' | 'work' | 'other'`.
+ * Patching an address TO `'detected'` is rejected: the home sheet's
+ * auto-prune logic deletes every address with `label === 'detected'`
+ * on each GPS tap, so accepting it via patch would let a malicious
+ * client convert a real saved address into a pruneable "detected"
+ * entry. Promoting an existing detected entry to home/work IS allowed
+ * because we let the user re-categorise their auto-saved address.
+ */
+const PatchableLabelSchema = z.enum(['home', 'work', 'other']);
+
+const PatchableShape = {
+  ...RawAddressInputShape,
+  label: PatchableLabelSchema,
+} as const;
+
+export const AddressPatchSchema = z
+  .object(PatchableShape)
+  .omit({ isDefault: true })
+  .partial()
+  .superRefine((data, ctx) => {
+    // Reject explicit sentinel usage in patches unconditionally — patches
+    // are always user-initiated edits, never the GPS auto-save flow.
+    if (data.phone === DETECTED_PHONE_SENTINEL) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['phone'],
+        message: 'Reserved sentinel phone — patches may not set it',
+      });
+    }
+    if (data.pincode === DETECTED_PINCODE_SENTINEL) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['pincode'],
+        message: 'Reserved sentinel pincode — patches may not set it',
+      });
+    }
+  });
 
 export type AddressPatch = z.infer<typeof AddressPatchSchema>;
 

@@ -4,7 +4,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import { promotions } from '../../data/promotions';
-import { okResponse, errResponse } from '../../lib/contracts';
+import { okResponse, errResponse } from '../../shared/contracts';
 
 export const promotionsRouter = Router();
 

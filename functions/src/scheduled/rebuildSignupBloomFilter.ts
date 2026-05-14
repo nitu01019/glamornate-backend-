@@ -2,6 +2,8 @@ import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
 import { BloomFilter } from '../utils/bloom-filter';
 import { createLogger } from '../utils/logger';
+import { normalisePhone } from '../utils/phone';
+import { SignupEmailSchema, SignupPhoneSchema } from '../shared/contracts';
 
 const logger = createLogger('rebuildSignupBloomFilter');
 
@@ -21,17 +23,132 @@ const STREAM_PAGE_SIZE = 1000;
 const MIN_EXPECTED_ITEMS = 10_000;
 
 /**
- * Normalise a phone string into E.164 form. MUST stay byte-for-byte
- * identical to the reader-side `normalisePhone` in
- * `callable/checkSignupAvailability.ts` — any drift breaks the bloom
- * filter's `has()` probe (the writer would store one byte sequence and
- * the reader would query a different one, so legitimate-collision
- * checks would silently fall through to the authoritative Firestore
- * lookup, defeating the optimisation).
+ * Upper bound on the bloom filter's expected-items count.
+ *
+ * `computeBitSize` for `n` items at 1% FPR uses ~9.585 * n bits, so:
+ *   - n =   700_000 → ~6.7 Mbit → ~840 KB raw → ~1.12 MB base64
+ *   - n = 1_000_000 → ~9.5 Mbit → ~1.2 MB raw → ~1.6 MB base64
+ *
+ * Firestore documents max out at 1 MiB. The 700k cap keeps the
+ * serialised payload safely under that ceiling for both the email and
+ * phone filters; if `users` ever crosses ~700k rows the audit doc's
+ * A-4-10 follow-up (split into two `_meta` docs) becomes mandatory.
  */
-function normalisePhone(raw: string): string {
-  const trimmed = raw.replace(/\s+/g, '');
-  return trimmed.startsWith('+') ? trimmed : `+${trimmed}`;
+const MAX_EXPECTED_ITEMS = 700_000;
+
+/**
+ * Inner implementation of the bloom rebuild — extracted so it can be
+ * driven from unit tests with a mocked `admin.firestore()`. The
+ * scheduled trigger below is a thin wrapper that calls into this.
+ */
+export async function runRebuildSignupBloomFilter(): Promise<{
+  scanned: number;
+  emailAdded: number;
+  phoneAdded: number;
+}> {
+  const db = admin.firestore();
+  const startedAt = Date.now();
+  logger.info('rebuildSignupBloomFilter: starting');
+
+  // First pass — count current users so we can size the filters
+  // appropriately. The `count()` aggregator is ~free vs streaming.
+  let userCount = 0;
+  try {
+    const countSnap = await db.collection('users').count().get();
+    userCount = countSnap.data().count ?? 0;
+  } catch (err) {
+    logger.warn('count() unavailable; defaulting to MIN_EXPECTED_ITEMS sizing', err);
+    userCount = MIN_EXPECTED_ITEMS;
+  }
+
+  // A-4-10: clamp expectedItems so the serialised filter stays under
+  // Firestore's 1 MiB document ceiling. The MIN floor protects cold
+  // starts (FPR), the MAX ceiling protects the write.
+  const expectedItems = Math.min(
+    Math.max(userCount, MIN_EXPECTED_ITEMS),
+    MAX_EXPECTED_ITEMS,
+  );
+  const emailFilter = BloomFilter.create(expectedItems);
+  const phoneFilter = BloomFilter.create(expectedItems);
+
+  // Streaming scan, paginated by document snapshot.
+  //
+  // A-4-07: explicit `orderBy(__name__)` so pagination's `startAfter`
+  // is anchored to a documented ordering. Implicit `__name__` ordering
+  // is stable today but not contractual — pinning it removes a quiet
+  // failure mode where a future Firestore behaviour change could yield
+  // duplicate or skipped pages.
+  let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
+  let scanned = 0;
+  let emailAdded = 0;
+  let phoneAdded = 0;
+
+  while (true) {
+    let q = db
+      .collection('users')
+      .orderBy(admin.firestore.FieldPath.documentId())
+      .select('profile.email', 'profile.phone')
+      .limit(STREAM_PAGE_SIZE);
+    if (lastDoc) {
+      q = q.startAfter(lastDoc);
+    }
+    const page = await q.get();
+    if (page.empty) break;
+
+    for (const doc of page.docs) {
+      scanned++;
+      const data = doc.data() as {
+        profile?: { email?: unknown; phone?: unknown };
+      };
+      const email = data.profile?.email;
+      const phone = data.profile?.phone;
+      // A-4-06: only add SCHEMA-VALID values to the bloom. Garbage rows
+      // (legacy malformed emails, half-typed phones) waste FPR budget
+      // because every false add bumps the bit-fill of the filter and
+      // increases the chance of a downstream `has()` collision on a
+      // legitimate probe.
+      if (typeof email === 'string' && email.length > 0) {
+        const parsed = SignupEmailSchema.safeParse(email);
+        if (parsed.success) {
+          // The schema already lowercased + trimmed via .trim().toLowerCase()
+          // transforms; use the canonical output, not the raw input.
+          emailFilter.add(parsed.data);
+          emailAdded++;
+        }
+      }
+      if (typeof phone === 'string' && phone.length > 0) {
+        // SignupPhoneSchema validates E.164 shape; we additionally
+        // normalise via the canonical normaliser so the bloom matches
+        // the reader's probe (A-4-01).
+        if (SignupPhoneSchema.safeParse(phone).success) {
+          phoneFilter.add(normalisePhone(phone));
+          phoneAdded++;
+        }
+      }
+    }
+
+    if (page.size < STREAM_PAGE_SIZE) break;
+    lastDoc = page.docs[page.docs.length - 1];
+  }
+
+  await db
+    .collection('_meta')
+    .doc('signupBloom')
+    .set({
+      email: emailFilter.serialise(),
+      phone: phoneFilter.serialise(),
+      userCount: scanned,
+      version: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+  const tookMs = Date.now() - startedAt;
+  logger.info('rebuildSignupBloomFilter: completed', {
+    scanned,
+    emailAdded,
+    phoneAdded,
+    tookMs,
+  });
+  return { scanned, emailAdded, phoneAdded };
 }
 
 /**
@@ -59,88 +176,6 @@ export const rebuildSignupBloomFilter = functions
   .pubsub.schedule('0 3 * * *')
   .timeZone('Asia/Kolkata')
   .onRun(async () => {
-    const db = admin.firestore();
-    const startedAt = Date.now();
-    logger.info('rebuildSignupBloomFilter: starting');
-
-    // First pass — count current users so we can size the filters
-    // appropriately. The `count()` aggregator is ~free vs streaming.
-    let userCount = 0;
-    try {
-      const countSnap = await db.collection('users').count().get();
-      userCount = countSnap.data().count ?? 0;
-    } catch (err) {
-      logger.warn('count() unavailable; defaulting to MIN_EXPECTED_ITEMS sizing', err);
-      userCount = MIN_EXPECTED_ITEMS;
-    }
-
-    const expectedItems = Math.max(userCount, MIN_EXPECTED_ITEMS);
-    const emailFilter = BloomFilter.create(expectedItems);
-    const phoneFilter = BloomFilter.create(expectedItems);
-
-    // Streaming scan, paginated by document snapshot. We deliberately
-    // don't `orderBy` on a user-mutable field — the implicit __name__
-    // ordering Firestore uses is stable and gives us deterministic pages.
-    let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
-    let scanned = 0;
-    let emailAdded = 0;
-    let phoneAdded = 0;
-
-    while (true) {
-      let q = db
-        .collection('users')
-        .select('profile.email', 'profile.phone')
-        .limit(STREAM_PAGE_SIZE);
-      if (lastDoc) {
-        q = q.startAfter(lastDoc);
-      }
-      const page = await q.get();
-      if (page.empty) break;
-
-      for (const doc of page.docs) {
-        scanned++;
-        const data = doc.data() as {
-          profile?: { email?: unknown; phone?: unknown };
-        };
-        const email = data.profile?.email;
-        const phone = data.profile?.phone;
-        if (typeof email === 'string' && email.length > 0) {
-          // Mirror the callable's normalisation: lowercase + trim.
-          emailFilter.add(email.trim().toLowerCase());
-          emailAdded++;
-        }
-        if (typeof phone === 'string' && phone.length > 0) {
-          // Apply the SAME `normalisePhone()` shape the reader uses in
-          // `callable/checkSignupAvailability.ts`. Without this, a stored
-          // phone like "919999912345" (no +) would be inserted raw into
-          // the bloom while the reader would probe "+919999912345" — the
-          // bloom would always say "definitely not present" and the
-          // optimisation would give a false-available result.
-          phoneFilter.add(normalisePhone(phone));
-          phoneAdded++;
-        }
-      }
-
-      if (page.size < STREAM_PAGE_SIZE) break;
-      lastDoc = page.docs[page.docs.length - 1];
-    }
-
-    await db
-      .collection('_meta')
-      .doc('signupBloom')
-      .set({
-        email: emailFilter.serialise(),
-        phone: phoneFilter.serialise(),
-        userCount: scanned,
-        version: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-    const tookMs = Date.now() - startedAt;
-    logger.info('rebuildSignupBloomFilter: completed', {
-      scanned,
-      emailAdded,
-      phoneAdded,
-      tookMs,
-    });
+    await runRebuildSignupBloomFilter();
     return null;
   });

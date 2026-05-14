@@ -1,9 +1,13 @@
 /**
  * Booking routes.
  *
- * - POST /bookings         — create a booking draft for the authenticated user.
  * - GET  /bookings         — list bookings the caller owns (paginated).
  * - GET  /bookings/:id     — fetch a booking the caller owns or administers.
+ *
+ * Booking creation goes through the `createBookingDraft` callable
+ * (`backend/functions/src/callable/createBooking.ts`) — never via this HTTP
+ * surface. The legacy `POST /bookings` stub was removed (SC-5 BE, V-1)
+ * because it returned synthetic IDs without persisting to Firestore.
  *
  * Authorization rules for GET /bookings/:id:
  *   - booking.userId === req.auth.uid  → allow (customer)
@@ -13,14 +17,10 @@
 
 import { Router, type Request, type Response } from 'express';
 import * as admin from 'firebase-admin';
-import {
-  BookingRequestSchema,
-  type BookingRequest,
-  okResponse,
-  errResponse,
-} from '../../lib/contracts';
+import { okResponse, errResponse } from '../../shared/contracts';
 import { z } from 'zod';
-import { verifyAuth } from '../middleware/auth';
+import { verifyAuth } from '../../auth/middleware';
+import { authedRateLimit } from '../middleware/rateLimit';
 import { validate, getValidated } from '../middleware/validate';
 
 export const bookingsRouter = Router();
@@ -49,43 +49,11 @@ function isAuthorizedToRead(
   return customerId === uid || spaOwnerId === uid;
 }
 
-bookingsRouter.post(
-  '/bookings',
-  verifyAuth(),
-  validate('body', BookingRequestSchema),
-  (req: Request, res: Response) => {
-    const uid = req.auth?.uid;
-    if (!uid) {
-      res.status(401).json(errResponse('Authentication required'));
-      return;
-    }
-
-    const body = getValidated<BookingRequest>(req, 'body');
-
-    const now = new Date().toISOString();
-    const bookingId = `booking_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-    res.status(201).json(
-      okResponse({
-        id: bookingId,
-        userId: uid,
-        bookingStatus: 'draft',
-        services: body.services,
-        date: body.date,
-        timeSlot: body.timeSlot,
-        location: body.location,
-        address: body.address,
-        notes: body.notes,
-        createdAt: now,
-        updatedAt: now,
-      }),
-    );
-  },
-);
-
 bookingsRouter.get(
   '/bookings',
   verifyAuth(),
+  // F-CG-01: rate-limit AFTER verifyAuth so req.auth.uid populates the key.
+  authedRateLimit((req) => req.auth?.uid),
   validate('query', BookingsListQuerySchema),
   async (req: Request, res: Response) => {
     const uid = req.auth?.uid;
@@ -134,6 +102,8 @@ bookingsRouter.get(
 bookingsRouter.get(
   '/bookings/:id',
   verifyAuth(),
+  // F-CG-01: rate-limit AFTER verifyAuth so req.auth.uid populates the key.
+  authedRateLimit((req) => req.auth?.uid),
   async (req: Request, res: Response) => {
     const uid = req.auth?.uid;
     if (!uid) {
